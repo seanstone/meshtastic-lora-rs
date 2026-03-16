@@ -5,6 +5,7 @@
 /// When the full proto corpus is needed, replace with prost-build output.
 
 pub mod radio;
+pub mod service_envelope;
 
 /// Destination port numbers (meshtastic/mesh.proto `PortNum`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]

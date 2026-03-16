@@ -65,10 +65,12 @@ meshtastic-lora-rs/
 │       │   └── node.rs      — LocalNode, NodeInfo, NeighbourTable
 │       ├── proto/
 │       │   ├── mod.rs       — Data, User, PortNum (hand-written prost)
-│       │   └── radio.rs     — MeshPacket, FromRadio, ToRadio, MyNodeInfo
+│       │   ├── radio.rs     — MeshPacket, FromRadio, ToRadio, MyNodeInfo
+│       │   └── service_envelope.rs — ServiceEnvelope (MQTT payload)
 │       ├── presets.rs       — ModemPreset + all 9 Meshtastic presets
 │       ├── app.rs           — MeshNode public API
 │       ├── serial.rs        — serial framing (magic + length-prefix)
+│       ├── mqtt.rs          — MQTT bridge (rumqttc, ServiceEnvelope)
 │       └── bin/
 │           ├── mesh_sim.rs  — two-node egui simulation binary
 │           └── mesh_node.rs — headless node (stdin/stdout + UHD)
@@ -165,11 +167,23 @@ swap to prost-build with the official
 [meshtastic/protobufs](https://github.com/meshtastic/protobufs) as a
 submodule.
 
-### C — MQTT bridge
+### C — MQTT bridge (implemented)
 
-Connect to an MQTT broker, subscribe to `msh/{channel}/{gateway}/#`, and
-bridge packets between the mesh and the internet.  Uses `rumqttc` (async
-MQTT, tokio-compatible).
+The `--mqtt` flag on `mesh_node` connects to a Meshtastic MQTT broker and
+bridges packets between the local RF channel and the internet.
+
+```sh
+# Default broker (mqtt.meshtastic.org)
+cargo run --bin mesh_node -- --mqtt
+
+# Custom broker
+cargo run --bin mesh_node -- --mqtt --mqtt-host broker.local --mqtt-port 1883
+```
+
+Subscribes to `msh/2/c/LongFast/+`, publishes to
+`msh/2/c/LongFast/%21{gateway_id}`.  Packets arrive as `ServiceEnvelope`
+protobufs and are fed to `MeshNode::process_rx_frame`.  Local RF RX and
+stdin text are also bridged to MQTT.  Uses `rumqttc` (async, tokio).
 
 ### D — WebSocket (WASM)
 
@@ -212,6 +226,7 @@ protocol is stable.
 | `tokio`  | Async runtime (native feature) |
 | `egui`   | Immediate-mode GUI             |
 | `eframe` | Native / wasm app framework    |
+| `rumqttc`| Async MQTT client (mqtt feat)  |
 | `lora`   | PHY TX / RX pipeline (submod)  |
 
-No C dependencies in the `mesh` crate.
+No C dependencies in the `mesh` crate (UHD links libuhd via lora).

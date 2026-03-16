@@ -51,6 +51,8 @@ use mesh::{
     },
     serial,
 };
+#[cfg(feature = "mqtt")]
+use mesh::mqtt::{MqttConfig, spawn_mqtt_bridge, mqtt_packet_to_raw};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -68,8 +70,11 @@ fn db_to_amp(db: f32) -> f32 { 10_f32.powf(db / 20.0) }
 
 // ── CLI args ─────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq)]
+enum Mode { Text, Serial, Mqtt }
+
 struct Config {
-    serial_mode: bool,
+    mode:        Mode,
     short_name:  String,
     long_name:   String,
     sf:          u8,
@@ -80,12 +85,18 @@ struct Config {
     uhd_args:    String,
     uhd_tx_gain: f64,
     uhd_rx_gain: f64,
+    // MQTT
+    mqtt_host:   String,
+    mqtt_port:   u16,
+    mqtt_user:   String,
+    mqtt_pass:   String,
+    mqtt_topic:  String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            serial_mode: false,
+            mode:        Mode::Text,
             short_name:  "MRST".into(),
             long_name:   "meshtastic-rs".into(),
             sf:          11,
@@ -96,6 +107,11 @@ impl Default for Config {
             uhd_args:    String::new(),
             uhd_tx_gain: 40.0,
             uhd_rx_gain: 40.0,
+            mqtt_host:   "mqtt.meshtastic.org".into(),
+            mqtt_port:   1883,
+            mqtt_user:   "meshdev".into(),
+            mqtt_pass:   "large4cats".into(),
+            mqtt_topic:  "msh/2/c".into(),
         }
     }
 }
@@ -106,24 +122,30 @@ fn parse_args() -> Config {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--serial"  => { cfg.serial_mode = true; }
-            "--name"    => { i += 1; cfg.short_name = args[i].clone(); }
-            "--long"    => { i += 1; cfg.long_name  = args[i].clone(); }
-            "--sf"      => { i += 1; cfg.sf         = args[i].parse().unwrap_or(11); }
-            "--preset"  => {
+            "--serial"     => { cfg.mode = Mode::Serial; }
+            "--mqtt"       => { cfg.mode = Mode::Mqtt; }
+            "--name"       => { i += 1; cfg.short_name = args[i].clone(); }
+            "--long"       => { i += 1; cfg.long_name  = args[i].clone(); }
+            "--sf"         => { i += 1; cfg.sf         = args[i].parse().unwrap_or(11); }
+            "--preset"     => {
                 i += 1;
                 if let Some(p) = preset_by_name(&args[i]) {
                     cfg.sf = p.sf;
                 }
             }
-            "--uhd"     => { cfg.use_uhd = true; }
-            "--freq"    => { i += 1; cfg.uhd_freq_mhz = args[i].parse().unwrap_or(906.875); }
-            "--args"    => { i += 1; cfg.uhd_args     = args[i].clone(); }
-            "--tx-gain" => { i += 1; cfg.uhd_tx_gain  = args[i].parse().unwrap_or(40.0); }
-            "--rx-gain" => { i += 1; cfg.uhd_rx_gain  = args[i].parse().unwrap_or(40.0); }
-            "--signal"  => { i += 1; cfg.signal_db    = args[i].parse().unwrap_or(-20.0); }
-            "--noise"   => { i += 1; cfg.noise_db     = args[i].parse().unwrap_or(-60.0); }
-            other       => { eprintln!("unknown arg: {other}"); }
+            "--uhd"        => { cfg.use_uhd = true; }
+            "--freq"       => { i += 1; cfg.uhd_freq_mhz = args[i].parse().unwrap_or(906.875); }
+            "--args"       => { i += 1; cfg.uhd_args     = args[i].clone(); }
+            "--tx-gain"    => { i += 1; cfg.uhd_tx_gain  = args[i].parse().unwrap_or(40.0); }
+            "--rx-gain"    => { i += 1; cfg.uhd_rx_gain  = args[i].parse().unwrap_or(40.0); }
+            "--signal"     => { i += 1; cfg.signal_db    = args[i].parse().unwrap_or(-20.0); }
+            "--noise"      => { i += 1; cfg.noise_db     = args[i].parse().unwrap_or(-60.0); }
+            "--mqtt-host"  => { i += 1; cfg.mqtt_host    = args[i].clone(); }
+            "--mqtt-port"  => { i += 1; cfg.mqtt_port    = args[i].parse().unwrap_or(1883); }
+            "--mqtt-user"  => { i += 1; cfg.mqtt_user    = args[i].clone(); }
+            "--mqtt-pass"  => { i += 1; cfg.mqtt_pass    = args[i].clone(); }
+            "--mqtt-topic" => { i += 1; cfg.mqtt_topic   = args[i].clone(); }
+            other          => { eprintln!("unknown arg: {other}"); }
         }
         i += 1;
     }
@@ -489,13 +511,136 @@ fn run_serial_mode(cfg: Config) {
     eprintln!("[serial] stdin closed, exiting");
 }
 
+// ── MQTT mode ────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "mqtt")]
+fn run_mqtt_mode(cfg: Config) {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(async move {
+        let channel_cfg = ChannelConfig::default();
+        let mut node = MeshNode::with_identity(channel_cfg, &cfg.short_name, &cfg.long_name);
+        let node_id = node.node_id();
+
+        let mqtt_cfg = MqttConfig {
+            host:       cfg.mqtt_host.clone(),
+            port:       cfg.mqtt_port,
+            username:   cfg.mqtt_user.clone(),
+            password:   cfg.mqtt_pass.clone(),
+            channel:    "LongFast".into(),
+            topic_root: cfg.mqtt_topic.clone(),
+        };
+
+        eprintln!("[mqtt] node !{:08x}  broker={}:{}  topic={}",
+            node_id, mqtt_cfg.host, mqtt_cfg.port, mqtt_cfg.sub_topic());
+
+        let mut bridge = match spawn_mqtt_bridge(mqtt_cfg, node_id).await {
+            Ok(b)  => b,
+            Err(e) => { eprintln!("[mqtt] failed to connect: {e}"); return; }
+        };
+        eprintln!("[mqtt] connected, listening...");
+
+        let mut driver = make_driver(&cfg);
+        let tx_modem = Tx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+        let rx_modem = Rx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+        let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
+        let mut phy = PhyState::new();
+
+        // Non-blocking stdin for text input (also works in MQTT mode).
+        let running = Arc::new(AtomicBool::new(true));
+        let running2 = running.clone();
+        let (tx_lines, rx_lines) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                match line {
+                    Ok(l) if l.is_empty() => continue,
+                    Ok(l) => { if tx_lines.send(l).is_err() { break; } }
+                    Err(_) => break,
+                }
+            }
+            running2.store(false, Ordering::Relaxed);
+        });
+
+        eprintln!("type a line to broadcast via RF+MQTT (Ctrl-D to quit)");
+
+        while running.load(Ordering::Relaxed) {
+            let tick_start = Instant::now();
+
+            // ── TX from stdin ────────────────────────────────────────────
+            while let Ok(line) = rx_lines.try_recv() {
+                if let Some(frame) = node.build_text_frame(BROADCAST, &line) {
+                    // TX over RF
+                    driver.push_samples(tx_modem.modulate(&frame.to_bytes()));
+                    // TX over MQTT
+                    bridge.publish_frame(&frame).await;
+                    println!("[TX] \"{}\"", line);
+                    io::stdout().flush().ok();
+                }
+            }
+
+            // ── RX from MQTT ─────────────────────────────────────────────
+            while let Ok(mqtt_rx) = bridge.rx.try_recv() {
+                if let Some(raw) = mqtt_packet_to_raw(&mqtt_rx.packet) {
+                    match node.process_rx_frame(&raw) {
+                        Ok((Some(msg), fwd)) => {
+                            if let Some(t) = msg.data.text() {
+                                println!("[MQTT RX] !{:08x}: \"{}\"  (hops={})",
+                                    msg.from, t, msg.hop_limit);
+                            } else {
+                                println!("[MQTT RX] !{:08x}: portnum={} len={}",
+                                    msg.from, msg.data.portnum, msg.data.payload.len());
+                            }
+                            io::stdout().flush().ok();
+                            // Optionally re-broadcast over RF
+                            if let Some(fwd_frame) = fwd {
+                                driver.push_samples(tx_modem.modulate(&fwd_frame.to_bytes()));
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[mqtt] rx err: {e}"),
+                    }
+                }
+            }
+
+            // ── PHY tick ─────────────────────────────────────────────────
+            for (msg, fwd) in tick_phy(&mut phy, &mut node, &mut driver, &tx_modem, &rx_modem, samples_per_tick) {
+                if let Some(ref m) = msg {
+                    if let Some(t) = m.data.text() {
+                        println!("[RF RX] !{:08x}: \"{}\"  (hops={})", m.from, t, m.hop_limit);
+                    } else {
+                        println!("[RF RX] !{:08x}: portnum={} len={}", m.from, m.data.portnum, m.data.payload.len());
+                    }
+                    io::stdout().flush().ok();
+                }
+                if let Some(fwd_frame) = fwd {
+                    // Forward over RF
+                    driver.push_samples(tx_modem.modulate(&fwd_frame.to_bytes()));
+                    // Also bridge to MQTT
+                    bridge.publish_frame(&fwd_frame).await;
+                }
+            }
+
+            let elapsed = tick_start.elapsed();
+            if let Some(remaining) = TICK.checked_sub(elapsed) {
+                tokio::time::sleep(remaining).await;
+            }
+        }
+        eprintln!("[mqtt] exiting");
+    });
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 fn main() {
     let cfg = parse_args();
-    if cfg.serial_mode {
-        run_serial_mode(cfg);
-    } else {
-        run_text_mode(cfg);
+    match cfg.mode {
+        Mode::Text   => run_text_mode(cfg),
+        Mode::Serial => run_serial_mode(cfg),
+        Mode::Mqtt   => {
+            #[cfg(feature = "mqtt")]
+            run_mqtt_mode(cfg);
+            #[cfg(not(feature = "mqtt"))]
+            eprintln!("MQTT support not compiled in (enable the 'mqtt' feature)");
+        }
     }
 }
