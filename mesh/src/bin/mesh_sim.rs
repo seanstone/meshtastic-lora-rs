@@ -131,13 +131,10 @@ fn sim_thread(shared: Arc<SimShared>) {
 
     let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
 
-    // Maximum rx_buffer tail to keep after a failed decode.  One full preamble
-    // + sync + a few payload symbols is enough for frame_sync to find a frame
-    // that straddles two ticks.
-    let max_rx_tail = |sf: u8| -> usize {
-        let sps = (1usize << sf) * OS_FACTOR as usize;
-        (PREAMBLE as usize + 8) * sps  // preamble + sync + margin
-    };
+    // Maximum rx_buffer before we force-drain.  Must hold at least one full
+    // maximum-size packet.  At SF=12/OS=4 the worst-case frame (253 B payload)
+    // is ~3 M samples; 4 M gives comfortable margin.
+    const MAX_RX_BUF: usize = 4_000_000;
 
     loop {
         let tick_start = Instant::now();
@@ -225,31 +222,32 @@ fn sim_thread(shared: Arc<SimShared>) {
         // ── Streaming RX decode ──────────────────────────────────────────
         rx_buffer.extend_from_slice(&mixed);
 
-        // Try to decode one frame from the buffer.
-        match rx_modem.decode_streaming(&rx_buffer) {
-            Some((payload, consumed)) => {
-                rx_buffer.drain(..consumed);
-                match node_b.process_rx_frame(&payload) {
-                    Ok((Some(msg), _fwd)) => {
-                        shared.rx_count.fetch_add(1, Ordering::Relaxed);
-                        let label = if let Some(t) = msg.data.text() {
-                            format!("RX B←* \"{}\" (hops: {})", t, msg.hop_limit)
-                        } else {
-                            format!("RX portnum={} to B", msg.data.portnum)
-                        };
-                        push_log(&shared, true, label);
+        // Safety-valve: prevent truly unbounded growth.
+        if rx_buffer.len() > MAX_RX_BUF {
+            let drain = rx_buffer.len() - MAX_RX_BUF / 2;
+            rx_buffer.drain(..drain);
+        }
+
+        // Try to decode frames from the buffer.
+        loop {
+            match rx_modem.decode_streaming(&rx_buffer) {
+                Some((payload, consumed)) => {
+                    rx_buffer.drain(..consumed);
+                    match node_b.process_rx_frame(&payload) {
+                        Ok((Some(msg), _fwd)) => {
+                            shared.rx_count.fetch_add(1, Ordering::Relaxed);
+                            let label = if let Some(t) = msg.data.text() {
+                                format!("RX B←* \"{}\" (hops: {})", t, msg.hop_limit)
+                            } else {
+                                format!("RX portnum={} to B", msg.data.portnum)
+                            };
+                            push_log(&shared, true, label);
+                        }
+                        Ok((None, _)) => {}
+                        Err(e) => push_log(&shared, false, format!("ERR: {e}")),
                     }
-                    Ok((None, _)) => {}
-                    Err(e) => push_log(&shared, false, format!("ERR: {e}")),
                 }
-            }
-            None => {
-                // No frame found — trim buffer to avoid unbounded growth.
-                // Keep only enough tail for a preamble that might straddle ticks.
-                let tail = max_rx_tail(sf);
-                if rx_buffer.len() > tail {
-                    rx_buffer.drain(..rx_buffer.len() - tail);
-                }
+                None => break,
             }
         }
 
