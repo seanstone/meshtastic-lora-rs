@@ -187,7 +187,8 @@ impl MeshNode {
         let h = &frame.header;
 
         // Reject frames on a different channel.
-        if h.channel_hash != self.channel.channel_hash() {
+        // MQTT-relayed packets don't carry channel_hash (set to 0), so skip the check.
+        if !h.via_mqtt && h.channel_hash != self.channel.channel_hash() {
             return Err(ProcessError::WrongChannel);
         }
 
