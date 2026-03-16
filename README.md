@@ -70,9 +70,8 @@ meshtastic-lora-rs/
 │       │   ├── router.rs    — stateless flood router + DedupCache
 │       │   └── node.rs      — LocalNode, NodeInfo, NeighbourTable
 │       ├── proto/
-│       │   ├── mod.rs       — Data, User, PortNum
-│       │   ├── radio.rs     — MeshPacket, FromRadio, ToRadio, MyNodeInfo
-│       │   └── service_envelope.rs — ServiceEnvelope (MQTT payload)
+│       │   ├── mod.rs       — re-exports + helper impls
+│       │   └── generated.rs — prost-build output (from protobufs/ submodule)
 │       ├── presets.rs       — ModemPreset + all 9 Meshtastic presets
 │       ├── app.rs           — MeshNode public API
 │       ├── serial.rs        — serial framing (magic + length-prefix)
@@ -81,6 +80,7 @@ meshtastic-lora-rs/
 │       └── bin/
 │           ├── mesh_sim.rs  — two-node egui simulation (spectrum + waterfall)
 │           └── mesh_node.rs — headless node (text / serial / MQTT)
+├── protobufs/               — meshtastic/protobufs submodule (.proto files)
 ├── web/                     — WASM build assets
 │   └── index.html
 ├── Makefile
@@ -183,11 +183,13 @@ See [docs/examples.md](docs/examples.md) for detailed walkthroughs:
 `Rx`.  The only changes to the submodule are additive public modules
 (`modem`, `channel`, `uhd`, `ui::SpectrumAnalyzer`).
 
-**Protobuf types are hand-written with `prost` derives** rather than
-generated from `.proto` files.  This avoids a `prost-build` + submodule
-dependency.  Migrating to generated code from the official
-[meshtastic/protobufs](https://github.com/meshtastic/protobufs) is a
-drop-in replacement when the full proto corpus is needed.
+**Protobuf types are generated from the official
+[meshtastic/protobufs](https://github.com/meshtastic/protobufs)** via
+`prost-build`.  The proto repo is a git submodule under `protobufs/`.
+Commonly used types (`Data`, `User`, `MeshPacket`, `FromRadio`, `ToRadio`,
+`ServiceEnvelope`, `PortNum`) are re-exported from `proto::` with helper
+impls (`encode_to_data`, `decode_user`, `text`).  The full generated
+corpus is available under `proto::generated::meshtastic`.
 
 **`MeshNode::process_rx_frame` is synchronous and stateless at the PHY
 boundary.**  The caller owns the IQ pipeline and calls `process_rx_frame`
@@ -232,6 +234,7 @@ share the same PHY tick loop and `MeshNode` instance.
 | `aes`    | AES-256 block cipher           |
 | `ctr`    | CTR mode wrapper               |
 | `prost`  | Protobuf encode / decode       |
+| `prost-build` | Proto code generation (build-dep) |
 | `rand`   | Random node ID generation      |
 | `tokio`  | Async runtime (native feature) |
 | `egui`   | Immediate-mode GUI             |

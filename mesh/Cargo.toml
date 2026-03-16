@@ -72,5 +72,4 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync"] }
 getrandom = { version = "0.2", features = ["js"] }
 
 [build-dependencies]
-# Uncomment when adding .proto compilation in a future phase:
-# prost-build = "0.13"
+prost-build = "0.13"

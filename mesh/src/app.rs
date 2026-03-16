@@ -161,7 +161,7 @@ impl MeshNode {
             id:         format!("!{:08x}", self.local.node_id),
             long_name:  self.local.long_name.clone(),
             short_name: self.local.short_name.clone(),
-            macaddr:    Vec::new(),
+            ..Default::default()
         };
         let data = user.encode_to_data();
         self.build_frame(BROADCAST, &data)

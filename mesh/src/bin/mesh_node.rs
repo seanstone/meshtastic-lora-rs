@@ -43,11 +43,9 @@ use mesh::{
     mac::packet::BROADCAST,
     presets::preset_by_name,
     proto::{
-        User,
-        radio::{
-            MeshPacket, MyNodeInfo, NodeInfoProto, FromRadio, ToRadio,
-            from_radio, to_radio, mesh_packet,
-        },
+        User, MeshPacket, MyNodeInfo, FromRadio, ToRadio,
+        NodeInfo as NodeInfoProto,
+        from_radio, to_radio, mesh_packet,
     },
     serial,
 };
@@ -203,14 +201,9 @@ fn msg_to_from_radio(msg: &MeshMessage, seq: &mut u32) -> FromRadio {
         payload_variant: Some(from_radio::PayloadVariant::Packet(MeshPacket {
             from:      msg.from,
             to:        msg.to,
-            id:        0,
-            channel:   0,
-            rx_time:   0,
-            rx_snr:    0.0,
             hop_limit: msg.hop_limit as u32,
-            want_ack:  false,
-            rx_rssi:   0,
             payload_variant: Some(mesh_packet::PayloadVariant::Decoded(msg.data.clone())),
+            ..Default::default()
         })),
     }
 }
@@ -228,9 +221,8 @@ fn send_config(
     send_from_radio(out, &FromRadio {
         id: *seq,
         payload_variant: Some(from_radio::PayloadVariant::MyInfo(MyNodeInfo {
-            my_node_num:      node.node_id(),
-            max_channels:     8,
-            firmware_version: FIRMWARE_VERSION.into(),
+            my_node_num:   node.node_id(),
+            ..Default::default()
         })),
     });
 
@@ -244,10 +236,9 @@ fn send_config(
                 id:         format!("!{:08x}", node.node_id()),
                 long_name:  cfg.long_name.clone(),
                 short_name: cfg.short_name.clone(),
-                macaddr:    Vec::new(),
+                ..Default::default()
             }),
-            snr:        0.0,
-            last_heard: 0,
+            ..Default::default()
         })),
     });
 
@@ -262,10 +253,9 @@ fn send_config(
                     id:         format!("!{:08x}", n.node_id),
                     long_name:  n.long_name.clone(),
                     short_name: n.short_name.clone(),
-                    macaddr:    Vec::new(),
+                    ..Default::default()
                 }),
-                snr:        0.0,
-                last_heard: 0,
+                ..Default::default()
             })),
         });
     }
@@ -304,6 +294,7 @@ fn handle_to_radio(
             let to = if pkt.to == 0 { BROADCAST } else { pkt.to };
             node.build_frame(to, &data)
         }
+        _ => None, // Disconnect, XmodemPacket, MqttClientProxyMessage, etc.
     }
 }
 

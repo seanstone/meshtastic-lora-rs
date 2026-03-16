@@ -22,10 +22,8 @@ mod bridge {
     use std::time::Duration;
     use tokio::sync::mpsc;
 
-    use crate::mac::crypto::MeshCrypto;
-    use crate::mac::packet::{BROADCAST, MeshFrame, MeshHeader};
-    use crate::proto::radio::{MeshPacket, mesh_packet};
-    use crate::proto::service_envelope::ServiceEnvelope;
+    use crate::mac::packet::{MeshFrame, MeshHeader};
+    use crate::proto::{MeshPacket, ServiceEnvelope, mesh_packet};
 
     /// Configuration for the MQTT bridge.
     #[derive(Clone)]
@@ -74,7 +72,7 @@ mod bridge {
         /// The MeshPacket extracted from the ServiceEnvelope.
         pub packet: MeshPacket,
         /// Gateway that relayed it.
-        pub gateway_id: u32,
+        pub gateway_id: String,
     }
 
     /// Handle to a running MQTT bridge.
@@ -86,7 +84,7 @@ mod bridge {
         pub rx: mpsc::Receiver<MqttRx>,
         client:     AsyncClient,
         pub_topic:  String,
-        gateway_id: u32,
+        gateway_id: String,
         channel_id: String,
     }
 
@@ -96,7 +94,7 @@ mod bridge {
             let envelope = ServiceEnvelope {
                 packet:     Some(packet.clone()),
                 channel_id: self.channel_id.clone(),
-                gateway_id: self.gateway_id,
+                gateway_id: self.gateway_id.clone(),
             };
             let payload = envelope.encode_to_vec();
             let _ = self.client
@@ -113,15 +111,12 @@ mod bridge {
                 from:      h.from,
                 to:        h.to,
                 id:        h.id,
-                channel:   0,
-                rx_time:   0,
-                rx_snr:    0.0,
                 hop_limit: h.hop_limit as u32,
                 want_ack:  h.want_ack,
-                rx_rssi:   0,
                 payload_variant: Some(mesh_packet::PayloadVariant::Encrypted(
                     frame.payload.clone(),
                 )),
+                ..Default::default()
             };
             self.publish(&pkt).await;
         }
@@ -148,11 +143,12 @@ mod bridge {
 
         let pub_topic  = config.pub_topic(gateway_id);
         let channel_id = config.channel.clone();
+        let gw_str     = format!("!{:08x}", gateway_id);
 
         let (tx, rx) = mpsc::channel::<MqttRx>(64);
 
         // Background task: read MQTT events, decode ServiceEnvelopes, forward.
-        let own_gateway = gateway_id;
+        let own_gateway = gw_str.clone();
         tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
@@ -168,7 +164,7 @@ mod bridge {
                             }
                         }
                     }
-                    Ok(_) => {} // connack, suback, pingresp, etc.
+                    Ok(_) => {}
                     Err(e) => {
                         eprintln!("[mqtt] connection error: {e}");
                         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -177,7 +173,7 @@ mod bridge {
             }
         });
 
-        Ok(MqttBridge { rx, client, pub_topic, gateway_id, channel_id })
+        Ok(MqttBridge { rx, client, pub_topic, gateway_id: gw_str, channel_id })
     }
 
     /// Convert an MQTT-received MeshPacket (with encrypted payload) into a
