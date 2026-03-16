@@ -15,6 +15,10 @@ wasm    = ["dep:gloo-timers"]
 # PHY layer (submodule — no C deps, no UHD, no GUI)
 lora = { path = "../lora-rs", default-features = false }
 
+# GUI (used by the mesh_sim binary)
+egui      = "0.33"
+eframe    = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+
 # AES-256-CTR encryption (pure Rust, no_std-compatible)
 aes = "0.8"
 ctr = "0.9"

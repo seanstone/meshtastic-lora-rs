@@ -1340,6 +1340,8 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "ctr",
+ "eframe",
+ "egui",
  "gloo-timers",
  "lora",
  "prost",
