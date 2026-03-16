@@ -86,6 +86,7 @@ struct SimShared {
     uhd_tx_gain_db: Mutex<f64>,
     rebuild_driver: AtomicBool,
     uhd_loading:    AtomicBool,
+    uhd_warning:    Mutex<Option<String>>,
 }
 
 impl SimShared {
@@ -118,6 +119,7 @@ impl SimShared {
             uhd_tx_gain_db: Mutex::new(40.0),
             rebuild_driver: AtomicBool::new(false),
             uhd_loading:    AtomicBool::new(false),
+            uhd_warning:    Mutex::new(None),
         })
     }
 }
@@ -147,7 +149,9 @@ fn make_driver(shared: &SimShared) -> Box<dyn Driver> {
         match UhdDevice::new(&args, freq, sr_hz, bw_hz, rx_gain, tx_gain) {
             Ok(dev) => return Box::new(dev),
             Err(e)  => {
-                eprintln!("[uhd] open failed: {e} — falling back to sim");
+                let msg = format!("UHD open failed: {e}");
+                eprintln!("[uhd] {msg} — falling back to sim");
+                *shared.uhd_warning.lock().unwrap() = Some(msg);
                 shared.use_uhd.store(false, Ordering::Relaxed);
             }
         }
@@ -236,7 +240,9 @@ async fn sim_loop(shared: Arc<SimShared>) {
                             match result {
                                 Ok(dev) => driver = Box::new(dev),
                                 Err(e) => {
-                                    eprintln!("[uhd] open failed: {e} — falling back to sim");
+                                    let msg = format!("UHD open failed: {e}");
+                                    eprintln!("[uhd] {msg} — falling back to sim");
+                                    *shared.uhd_warning.lock().unwrap() = Some(msg);
                                     shared.use_uhd.store(false, Ordering::Relaxed);
                                 }
                             }
@@ -411,6 +417,7 @@ struct MeshSimApp {
     uhd_freq_mhz:    f64,
     uhd_rx_gain_db:  f64,
     uhd_tx_gain_db:  f64,
+    uhd_warning:     Option<String>,
 }
 
 impl MeshSimApp {
@@ -445,6 +452,7 @@ impl MeshSimApp {
             uhd_freq_mhz:   915.0,
             uhd_rx_gain_db:  40.0,
             uhd_tx_gain_db:  40.0,
+            uhd_warning:     None,
         }
     }
 
@@ -481,6 +489,17 @@ impl MeshSimApp {
 impl eframe::App for MeshSimApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(32));
+
+        // Sync UHD state — the sim loop may have flipped use_uhd off on failure.
+        #[cfg(feature = "uhd")]
+        {
+            let shared_uhd = self.shared.use_uhd.load(Ordering::Relaxed);
+            if self.use_uhd && !shared_uhd {
+                self.use_uhd = false;
+                // Pick up the warning message set by the sim loop.
+                self.uhd_warning = self.shared.uhd_warning.lock().unwrap().take();
+            }
+        }
 
         #[cfg(feature = "uhd")]
         if self.shared.uhd_loading.load(Ordering::Relaxed) {
@@ -578,6 +597,7 @@ impl eframe::App for MeshSimApp {
                 #[cfg(feature = "uhd")]
                 if ui.selectable_label(self.use_uhd, "UHD").clicked() && !self.use_uhd {
                     self.use_uhd = true;
+                    self.uhd_warning = None;
                     self.shared.use_uhd.store(true, Ordering::Relaxed);
                     self.trigger_rebuild();
                 }
@@ -586,6 +606,9 @@ impl eframe::App for MeshSimApp {
                     ui.add_enabled(false, egui::SelectableLabel::new(false, "UHD (disabled)"));
                 }
             });
+            if let Some(warn) = &self.uhd_warning {
+                ui.colored_label(egui::Color32::from_rgb(255, 160, 0), warn);
+            }
 
             if self.use_uhd {
                 ui.add_space(4.0);
