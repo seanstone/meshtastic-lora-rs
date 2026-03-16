@@ -11,7 +11,7 @@ use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
     thread,
 };
 
@@ -39,8 +39,6 @@ const FFT_SIZE: usize = 2048;
 const SR_HZ: u64 = 1_000_000;
 /// Sim tick period (~60 fps).
 const TICK: Duration = Duration::from_millis(16);
-/// Max RX buffer size before we start draining (avoid unbounded growth).
-const MAX_RX_BUF: usize = 4_000_000;
 /// NodeInfo beacon interval in samples.
 const BEACON_INTERVAL: u64 = 5 * SR_HZ;
 
@@ -76,6 +74,8 @@ impl SimShared {
         let init_spec: Vec<[f64; 2]> = (0..FFT_SIZE).map(|i| [i as f64, -80.0]).collect();
         let spectrum_plot  = SpectrumPlot::new("Spectrum",   init_spec.clone(), -80.0, 80.0);
         let waterfall_plot = WaterfallPlot::new("Waterfall", init_spec,         -80.0);
+        waterfall_plot.set_freq(FFT_SIZE as f64 / 2.0);
+        waterfall_plot.set_bw(FFT_SIZE as f64);
 
         Arc::new(Self {
             running:      AtomicBool::new(true),
@@ -131,13 +131,23 @@ fn sim_thread(shared: Arc<SimShared>) {
 
     let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
 
+    // Maximum rx_buffer tail to keep after a failed decode.  One full preamble
+    // + sync + a few payload symbols is enough for frame_sync to find a frame
+    // that straddles two ticks.
+    let max_rx_tail = |sf: u8| -> usize {
+        let sps = (1usize << sf) * OS_FACTOR as usize;
+        (PREAMBLE as usize + 8) * sps  // preamble + sync + margin
+    };
+
     loop {
+        let tick_start = Instant::now();
+
         if !shared.running.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(50));
             continue;
         }
 
-        // ── Read params ──────────────────────────────────────────────────
+        // ── Read params (single lock per field, fast) ────────────────────
         let sf         = *shared.sf.lock().unwrap();
         let signal_amp = db_to_amp(*shared.signal_db.lock().unwrap());
         let noise_sigma = db_to_amp(*shared.noise_db.lock().unwrap()) / std::f32::consts::SQRT_2;
@@ -215,37 +225,39 @@ fn sim_thread(shared: Arc<SimShared>) {
         // ── Streaming RX decode ──────────────────────────────────────────
         rx_buffer.extend_from_slice(&mixed);
 
-        // Prevent unbounded growth.
-        if rx_buffer.len() > MAX_RX_BUF {
-            let drain = rx_buffer.len() - MAX_RX_BUF / 2;
-            rx_buffer.drain(..drain);
-        }
-
-        // Try to decode frames from the buffer.
-        loop {
-            match rx_modem.decode_streaming(&rx_buffer) {
-                Some((payload, consumed)) => {
-                    rx_buffer.drain(..consumed);
-                    // Route through Node B.
-                    match node_b.process_rx_frame(&payload) {
-                        Ok((Some(msg), _fwd)) => {
-                            shared.rx_count.fetch_add(1, Ordering::Relaxed);
-                            let label = if let Some(t) = msg.data.text() {
-                                format!("RX B←* \"{}\" (hops: {})", t, msg.hop_limit)
-                            } else {
-                                format!("RX portnum={} to B", msg.data.portnum)
-                            };
-                            push_log(&shared, true, label);
-                        }
-                        Ok((None, _)) => {}
-                        Err(e) => push_log(&shared, false, format!("ERR: {e}")),
+        // Try to decode one frame from the buffer.
+        match rx_modem.decode_streaming(&rx_buffer) {
+            Some((payload, consumed)) => {
+                rx_buffer.drain(..consumed);
+                match node_b.process_rx_frame(&payload) {
+                    Ok((Some(msg), _fwd)) => {
+                        shared.rx_count.fetch_add(1, Ordering::Relaxed);
+                        let label = if let Some(t) = msg.data.text() {
+                            format!("RX B←* \"{}\" (hops: {})", t, msg.hop_limit)
+                        } else {
+                            format!("RX portnum={} to B", msg.data.portnum)
+                        };
+                        push_log(&shared, true, label);
                     }
+                    Ok((None, _)) => {}
+                    Err(e) => push_log(&shared, false, format!("ERR: {e}")),
                 }
-                None => break,
+            }
+            None => {
+                // No frame found — trim buffer to avoid unbounded growth.
+                // Keep only enough tail for a preamble that might straddle ticks.
+                let tail = max_rx_tail(sf);
+                if rx_buffer.len() > tail {
+                    rx_buffer.drain(..rx_buffer.len() - tail);
+                }
             }
         }
 
-        thread::sleep(TICK);
+        // Sleep only the remainder of the tick to maintain real-time pacing.
+        let elapsed = tick_start.elapsed();
+        if let Some(remaining) = TICK.checked_sub(elapsed) {
+            thread::sleep(remaining);
+        }
     }
 }
 
