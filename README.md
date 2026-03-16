@@ -215,7 +215,7 @@ share the same PHY tick loop and `MeshNode` instance.
 | 4 | Forward handling — re-modulate + relay `Option<MeshFrame>` from `process_rx_frame` | done |
 | 5 | Node identity config — short/long name fields in Terminal mode | done |
 | 6 | PER enhancements — colour-coded label | done |
-| 7 | Destination selector — broadcast or unicast to neighbour | pending |
+| 7 | Destination selector — broadcast or unicast to neighbour | done |
 
 ### Other
 

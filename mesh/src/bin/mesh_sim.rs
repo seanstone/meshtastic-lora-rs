@@ -113,6 +113,7 @@ struct SimShared {
     rebuild_nodes:  AtomicBool,
     node_short:     Mutex<String>,
     node_long:      Mutex<String>,
+    tx_dest:        Mutex<u32>,
 }
 
 impl SimShared {
@@ -152,6 +153,7 @@ impl SimShared {
             rebuild_nodes:  AtomicBool::new(false),
             node_short:     Mutex::new("TERM".into()),
             node_long:      Mutex::new("Mesh Terminal".into()),
+            tx_dest:        Mutex::new(BROADCAST),
         })
     }
 }
@@ -431,11 +433,14 @@ async fn sim_loop(shared: Arc<SimShared>) {
             }
         }
 
+        // ── Read destination ──────────────────────────────────────────────
+        let tx_dest = *shared.tx_dest.lock().unwrap();
+
         // ── Manual TX (drain user-typed messages) ─────────────────────────
         {
             let manual: Vec<String> = shared.tx_queue.lock().unwrap().drain(..).collect();
             for text in manual {
-                if let Some(frame) = nodes.tx_node().build_text_frame(BROADCAST, &text) {
+                if let Some(frame) = nodes.tx_node().build_text_frame(tx_dest, &text) {
                     shared.tx_count.fetch_add(1, Ordering::Relaxed);
                     push_log(&shared, MsgDir::Tx, format!("\"{text}\""));
                     let iq = tx_modem.modulate(&frame.to_bytes());
@@ -450,7 +455,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
             seq += 1;
             let text = format!("Test #{seq}");
 
-            if let Some(frame) = nodes.tx_node().build_text_frame(BROADCAST, &text) {
+            if let Some(frame) = nodes.tx_node().build_text_frame(tx_dest, &text) {
                 shared.tx_count.fetch_add(1, Ordering::Relaxed);
                 push_log(&shared, MsgDir::Tx, format!("\"{text}\""));
                 let iq = tx_modem.modulate(&frame.to_bytes());
@@ -555,6 +560,8 @@ struct MeshSimApp {
     mode:            SimMode,
     node_short:      String,
     node_long:       String,
+    tx_dest:         u32,
+    tx_dest_input:   String,
 }
 
 impl MeshSimApp {
@@ -595,6 +602,8 @@ impl MeshSimApp {
             mode:            SimMode::TwoNodeTest,
             node_short:      "TERM".into(),
             node_long:       "Mesh Terminal".into(),
+            tx_dest:         BROADCAST,
+            tx_dest_input:   String::new(),
         }
     }
 
@@ -890,6 +899,53 @@ impl eframe::App for MeshSimApp {
             ui.separator();
 
             ui.heading("Mesh Messages");
+
+            // ── Destination + message input row ──────────────────────────
+            ui.horizontal(|ui| {
+                ui.label("To:");
+                let dest_label = if self.tx_dest == BROADCAST {
+                    "Broadcast".to_string()
+                } else {
+                    format!("!{:08x}", self.tx_dest)
+                };
+                egui::ComboBox::from_id_salt("tx_dest")
+                    .selected_text(&dest_label)
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(self.tx_dest == BROADCAST, "Broadcast").clicked() {
+                            self.tx_dest = BROADCAST;
+                            *self.shared.tx_dest.lock().unwrap() = BROADCAST;
+                        }
+                        // Populate from neighbour table.
+                        let neighbours = self.shared.a_neighbours.lock().unwrap().clone();
+                        for entry in &neighbours {
+                            // Entries are formatted "SHORT (!aabbccdd)" — parse the ID.
+                            if let Some(hex) = entry.split("(!").nth(1).and_then(|s| s.strip_suffix(')')) {
+                                if let Ok(id) = u32::from_str_radix(hex, 16) {
+                                    let label = entry.split(" (!").next().unwrap_or(hex);
+                                    if ui.selectable_label(self.tx_dest == id, label).clicked() {
+                                        self.tx_dest = id;
+                                        *self.shared.tx_dest.lock().unwrap() = id;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                // Manual hex entry.
+                let hex_resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.tx_dest_input)
+                        .hint_text("or hex ID…")
+                        .desired_width(72.0),
+                );
+                if hex_resp.lost_focus() && !self.tx_dest_input.is_empty() {
+                    let cleaned = self.tx_dest_input.trim_start_matches("!").trim_start_matches("0x");
+                    if let Ok(id) = u32::from_str_radix(cleaned, 16) {
+                        self.tx_dest = id;
+                        *self.shared.tx_dest.lock().unwrap() = id;
+                    }
+                    self.tx_dest_input.clear();
+                }
+            });
             ui.horizontal(|ui| {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.msg_input)
