@@ -515,21 +515,33 @@ impl eframe::App for MeshSimApp {
                 *self.shared.sf.lock().unwrap() = self.sf;
             }
 
+            // TX gain — sim: signal_db (dBFS);  UHD: uhd_tx_gain_db (dB)
             ui.add_space(4.0);
-            let sim_mode = !self.use_uhd;
-            ui.label(format!("Signal  {:.0} dB", self.signal_db));
-            if ui.add_enabled(sim_mode, egui::Slider::new(&mut self.signal_db, -60.0_f32..=0.0).show_value(false)).changed() {
-                *self.shared.signal_db.lock().unwrap() = self.signal_db;
+            if !self.use_uhd {
+                ui.label(format!("TX gain  {:.0} dBFS", self.signal_db));
+                if ui.add(egui::Slider::new(&mut self.signal_db, -40.0_f32..=20.0).show_value(false)).changed() {
+                    *self.shared.signal_db.lock().unwrap() = self.signal_db;
+                }
+            } else {
+                ui.label(format!("TX gain  {:.0} dB", self.uhd_tx_gain_db));
+                if ui.add(egui::Slider::new(&mut self.uhd_tx_gain_db, 0.0_f64..=89.0).show_value(false)).changed() {
+                    *self.shared.uhd_tx_gain_db.lock().unwrap() = self.uhd_tx_gain_db;
+                }
             }
 
-            ui.label(format!("Noise   {:.0} dB", self.noise_db));
-            if ui.add_enabled(sim_mode, egui::Slider::new(&mut self.noise_db, -80.0_f32..=-20.0).show_value(false)).changed() {
-                *self.shared.noise_db.lock().unwrap() = self.noise_db;
-            }
-
-            if sim_mode {
+            // Noise (sim) / RX gain (UHD)
+            if !self.use_uhd {
+                ui.label(format!("Noise  {:.0} dBFS", self.noise_db));
+                if ui.add(egui::Slider::new(&mut self.noise_db, -80.0_f32..=0.0).show_value(false)).changed() {
+                    *self.shared.noise_db.lock().unwrap() = self.noise_db;
+                }
                 ui.label(RichText::new(format!("SNR  {:.0} dB", self.snr_db()))
                     .color(if self.snr_db() > 0.0 { Color32::GREEN } else { Color32::YELLOW }));
+            } else {
+                ui.label(format!("RX gain  {:.0} dB", self.uhd_rx_gain_db));
+                if ui.add(egui::Slider::new(&mut self.uhd_rx_gain_db, 0.0_f64..=76.0).show_value(false)).changed() {
+                    *self.shared.uhd_rx_gain_db.lock().unwrap() = self.uhd_rx_gain_db;
+                }
             }
 
             ui.add_space(4.0);
@@ -599,18 +611,6 @@ impl eframe::App for MeshSimApp {
                         self.trigger_rebuild();
                     }
                 });
-
-                // TX gain.
-                ui.label(format!("TX Gain  {:.0} dB", self.uhd_tx_gain_db));
-                if ui.add(egui::Slider::new(&mut self.uhd_tx_gain_db, 0.0_f64..=89.0).show_value(false)).changed() {
-                    *self.shared.uhd_tx_gain_db.lock().unwrap() = self.uhd_tx_gain_db;
-                }
-
-                // RX gain.
-                ui.label(format!("RX Gain  {:.0} dB", self.uhd_rx_gain_db));
-                if ui.add(egui::Slider::new(&mut self.uhd_rx_gain_db, 0.0_f64..=76.0).show_value(false)).changed() {
-                    *self.shared.uhd_rx_gain_db.lock().unwrap() = self.uhd_rx_gain_db;
-                }
             }
 
             ui.separator();
