@@ -806,10 +806,20 @@ impl eframe::App for MeshSimApp {
 
             let tx = self.shared.tx_count.load(Ordering::Relaxed);
             let rx = self.shared.rx_count.load(Ordering::Relaxed);
-            ui.label(format!("TX  {tx}"));
-            ui.label(format!("RX  {rx}"));
+            ui.horizontal(|ui| {
+                ui.label(format!("TX {tx}"));
+                ui.label(format!("RX {rx}"));
+            });
             if tx > 0 {
-                ui.label(format!("PER  {:.1}%", (tx - rx.min(tx)) as f32 / tx as f32 * 100.0));
+                let per = (tx - rx.min(tx)) as f32 / tx as f32 * 100.0;
+                let per_color = if per < 5.0 {
+                    Color32::from_rgb(100, 220, 100)  // green
+                } else if per < 20.0 {
+                    Color32::from_rgb(255, 200, 80)   // amber
+                } else {
+                    Color32::from_rgb(220, 100, 100)  // red
+                };
+                ui.label(RichText::new(format!("PER  {per:.1}%")).color(per_color));
             }
             if ui.small_button("Reset stats").clicked() {
                 self.reset_stats();
