@@ -22,9 +22,9 @@
 </head>
 <body>
     <canvas id="canvas"></canvas>
-    <link data-trunk rel="rust" data-bin="mesh_sim"
-          data-cargo-no-default-features=""
-          data-cargo-features="wasm"
-          data-wasm-opt="z"/>
+    <script type="module">
+        import init from './mesh_sim.js';
+        init();
+    </script>
 </body>
 </html>
