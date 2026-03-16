@@ -128,6 +128,7 @@ fn sim_thread(shared: Arc<SimShared>) {
     let mut seq: u32 = 0;
     let mut next_tx_at: u64 = SR_HZ; // first packet after 1 s warm-up
     let mut next_beacon_at: u64 = SR_HZ / 2; // first beacon after 0.5 s
+    let mut prev_interval_ms: u64 = 2000;
 
     let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
 
@@ -150,6 +151,15 @@ fn sim_thread(shared: Arc<SimShared>) {
         let noise_sigma = db_to_amp(*shared.noise_db.lock().unwrap()) / std::f32::consts::SQRT_2;
         let interval_ms = *shared.interval_ms.lock().unwrap();
         let interval_samples = interval_ms * SR_HZ / 1000;
+
+        // If interval was shortened, clamp next_tx_at so it fires sooner.
+        if interval_ms != prev_interval_ms {
+            prev_interval_ms = interval_ms;
+            let earliest = produced + interval_samples;
+            if next_tx_at > earliest {
+                next_tx_at = earliest;
+            }
+        }
 
         channel.set_signal_amp(signal_amp);
         channel.set_noise_sigma(noise_sigma);
