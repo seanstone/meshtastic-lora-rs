@@ -17,6 +17,15 @@ cargo build
 cheap LoRa radios (typically ~$20 ESP32 + SX1262 boards like the Heltec V3
 or LilyGo T-Beam) into a long-range, off-grid mesh network.
 
+```
+              5-20 km LoRa link
+  [Node A] ~~~~~~~~~~~~~~~~~~~~~~~~~~~~ [Node B]
+  Heltec V3          chirp spread         T-Beam
+  SF11/250kHz        spectrum             SF11/250kHz
+                     AES-256-CTR
+                     hop_limit=3
+```
+
 Key concepts:
 
 - **LoRa** is a chirp-spread-spectrum modulation that trades data rate for
@@ -27,6 +36,11 @@ Key concepts:
   from node A can reach node C via node B, even if A and C are out of
   direct range.  Each packet has a `hop_limit` (default 3) that is
   decremented on each relay to prevent infinite loops.
+
+```
+  [A] --RF--> [B] --RF--> [C]
+  hop=3       hop=2       hop=1 (delivered)
+```
 
 - **Encryption** is mandatory.  Every packet body is AES-256-CTR encrypted
   with a channel PSK (pre-shared key).  The default public channel uses a
@@ -40,9 +54,30 @@ Key concepts:
   broker (default: `mqtt.meshtastic.org`).  This extends the mesh globally —
   a message sent on RF in Tokyo can be read by a subscriber in Berlin.
 
+```
+  [Radio A] --RF--> [Gateway B] --MQTT--> mqtt.meshtastic.org
+                                              |
+                                              +--> [Subscriber in Berlin]
+                                              +--> [Dashboard in London]
+```
+
 This project (`meshtastic-lora-rs`) implements the Meshtastic protocol
 stack in pure Rust, from the LoRa PHY layer up through mesh routing, with
 multiple I/O interfaces for integration.
+
+```
+  ┌──────────────────────────────────────────────────┐
+  │                meshtastic-lora-rs                 │
+  │                                                  │
+  │   stdin ──┐                                      │
+  │   MQTT  ──┼──> MeshNode ──> Tx ──> Driver ──> RF │
+  │   WS    ──┘       |                    |         │
+  │                    |        Rx <── Driver         │
+  │   stdout <─┐      v                              │
+  │   MQTT   <─┼── process_rx                        │
+  │   WS     <─┘                                     │
+  └──────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -50,6 +85,23 @@ multiple I/O interfaces for integration.
 
 The GUI simulator runs two virtual Meshtastic nodes communicating over a
 simulated AWGN (noise) channel.  No hardware needed.
+
+```
+  ┌─────────────────── mesh_sim ───────────────────────┐
+  │                                                     │
+  │  ┌──────────┐    AWGN Channel    ┌──────────┐      │
+  │  │  Node A  │ ──── IQ + noise ──>│  Node B  │      │
+  │  │ (sender) │                    │(receiver)│      │
+  │  └──────────┘                    └──────────┘      │
+  │       |                               |            │
+  │       v                               v            │
+  │  ┌─────────────────────────────────────────────┐   │
+  │  │  egui GUI                                   │   │
+  │  │  [spectrum] [waterfall] [message log]        │   │
+  │  │  [settings: SF, gain, noise, preset]         │   │
+  │  └─────────────────────────────────────────────┘   │
+  └─────────────────────────────────────────────────────┘
+```
 
 ```sh
 cargo run
@@ -94,11 +146,32 @@ Same GUI, runs entirely in the browser.  Useful for demos and sharing.
 
 ## 2. Chatting in text mode
 
-The simplest integration: two terminal windows talking to each other through
-the simulated channel.
+The simplest integration: a single node that loops back through the
+simulated channel.
+
+```
+  ┌─────────── Terminal ───────────┐
+  │                                │
+  │  stdin ──> mesh_node           │
+  │              |                 │
+  │              v                 │
+  │           MeshNode             │
+  │              |                 │
+  │       build_text_frame         │
+  │              |                 │
+  │              v                 │
+  │    Tx::modulate ──> Channel    │
+  │                       |        │
+  │              Rx::decode <──┘   │
+  │              |                 │
+  │       process_rx_frame         │
+  │              |                 │
+  │              v                 │
+  │  stdout <── "[RX] ..."        │
+  └────────────────────────────────┘
+```
 
 ```sh
-# Terminal 1
 cargo run --bin mesh_node
 ```
 
@@ -130,6 +203,22 @@ cargo run --bin mesh_node -- --name HIKE --long "Trail Camera Node" --sf 12
 
 Meshtastic nodes worldwide bridge their local RF traffic to
 `mqtt.meshtastic.org`.  You can listen in without any radio hardware:
+
+```
+  ┌─────── mesh_node ───────┐     ┌──── mqtt.meshtastic.org ────┐
+  │                          │     │                              │
+  │  MeshNode                │     │  msh/2/c/LongFast/+         │
+  │     ^                    │     │     ^           |            │
+  │     |                    │     │     |           v            │
+  │  process_rx_frame        │<────│  ServiceEnvelope (protobuf)  │
+  │     |                    │     │     ^                        │
+  │     v                    │     │     |                        │
+  │  stdout: [MQTT RX] ...  │     │  [Radio nodes worldwide]     │
+  │                          │     │  Portland, Tokyo, Berlin...  │
+  │  stdin ──> build_frame ──│────>│                              │
+  │                          │     └──────────────────────────────┘
+  └──────────────────────────┘
+```
 
 ```sh
 cargo run --bin mesh_node -- --mqtt
@@ -176,6 +265,26 @@ cargo run --bin mesh_node -- --mqtt \
 
 The `--ws` flag starts a WebSocket server so you can build a real-time web
 dashboard, integrate with Node.js, or feed data to Home Assistant.
+
+```
+  ┌──────── mesh_node ────────┐
+  │                            │
+  │  MQTT <──> MeshNode        │
+  │              |   ^         │
+  │              v   |         │
+  │           WsServer (:9001) │
+  │           /    |    \      │
+  └──────────/─────|─────\─────┘
+            v      v      v
+     ┌──────────┐ ┌─────┐ ┌────────────┐
+     │ Browser  │ │ CLI │ │ Node.js    │
+     │ dashboard│ │ tool│ │ automation │
+     └──────────┘ └─────┘ └────────────┘
+
+  JSON over WebSocket:
+    --> { "type": "send_text", "text": "hello" }
+    <-- { "type": "rx", "from": ..., "text": "reply" }
+```
 
 ### Step 1: Start the node with WebSocket
 
@@ -255,6 +364,20 @@ interface or MQTT directly.
 
 ### Option A: MQTT (recommended)
 
+```
+  ┌─────── mesh_node ───────┐   ┌───── Home Assistant ──────┐
+  │                          │   │                            │
+  │  [global Meshtastic      │   │  Mosquitto add-on          │
+  │   MQTT traffic]          │   │     |                      │
+  │        |                 │   │     v                      │
+  │        v                 │   │  MQTT sensor               │
+  │     MeshNode ──> MQTT ───│──>│  "msh/2/c/LongFast/+"     │
+  │                          │   │     |                      │
+  │                          │   │     v                      │
+  │                          │   │  Automations / dashboard   │
+  └──────────────────────────┘   └────────────────────────────┘
+```
+
 If Home Assistant already has an MQTT broker (Mosquitto add-on), point
 `mesh_node` at it:
 
@@ -284,6 +407,20 @@ converts to JSON.
 
 ### Option B: WebSocket + Node-RED
 
+```
+  mesh_node --mqtt --ws
+       |              |
+       v              v
+    MQTT broker    WsServer (:9001)
+                      |
+                      v
+                   Node-RED
+                      |
+                      v
+                 Home Assistant
+                 (REST / MQTT)
+```
+
 1. Start `mesh_node` with `--mqtt --ws`
 2. In Node-RED, use a WebSocket client node connecting to
    `ws://localhost:9001`
@@ -295,6 +432,22 @@ converts to JSON.
 
 Suppose you have remote sensors (weather stations, trail cameras, water
 level monitors) reporting via Meshtastic.  You can capture their telemetry:
+
+```
+  [Weather Station]   [Trail Cam]   [Water Sensor]
+        |                  |               |
+        v                  v               v
+  LoRa RF mesh (906.875 MHz, LongFast)
+        |
+        v
+  ┌──── mesh_node --mqtt ────┐
+  │                           │
+  │  stdout:                  │
+  │  [MQTT RX] portnum=67 .. │──> tee mesh_log.txt
+  │  [MQTT RX] portnum=3  .. │──> filter script
+  │  [MQTT RX] portnum=1  .. │──> alert webhook
+  └───────────────────────────┘
+```
 
 ```sh
 # Log all mesh traffic to a file
@@ -320,6 +473,26 @@ done
 If you have an Ettus Research USRP (B200, B210, N310, etc.), you can use it
 as a Meshtastic-compatible LoRa radio.  This turns your PC into a
 full-power mesh node.
+
+```
+  ┌──────── Your PC ────────────────────────────────────┐
+  │                                                      │
+  │  mesh_node --uhd --mqtt --ws                         │
+  │     |         |        |                             │
+  │     |         |        +---> WsServer (:9001)        │
+  │     |         +---> mqtt.meshtastic.org              │
+  │     v                                                │
+  │  lora::uhd::UhdDevice                                │
+  │     |                                                │
+  └─────|────────────────────────────────────────────────┘
+        | USB 3.0 / Ethernet
+        v
+  ┌──────────┐       LoRa RF         ┌──────────────┐
+  │  USRP    │ ~~~~~~~~~~~~~~~~~~~>> │  Heltec V3   │
+  │  B210    │ <<~~~~~~~~~~~~~~~~~~~ │  (off-shelf)  │
+  │  906 MHz │       5-20 km         │  Meshtastic  │
+  └──────────┘                       └──────────────┘
+```
 
 ### Prerequisites
 
@@ -367,7 +540,16 @@ cargo run --bin mesh_node -- \
   --ws
 ```
 
-This creates a four-way bridge: **RF ↔ stdin ↔ MQTT ↔ WebSocket**.
+This creates a four-way bridge:
+
+```
+  stdin  <──┐         ┌──>  MQTT (internet)
+             \       /
+              MeshNode
+             /       \
+  RF (UHD) <──┘         └──>  WebSocket (dashboard)
+```
+
 Messages received on RF are published to MQTT and pushed to WebSocket
 clients.  Messages from MQTT or WebSocket are transmitted on RF.
 
@@ -387,14 +569,33 @@ Meshtastic packets from nearby nodes as chirp sweeps on the waterfall.
 
 The GUI simulator compiles to WebAssembly and runs in any modern browser.
 
+```
+  ┌──────────── Browser ──────────────┐
+  │                                    │
+  │  index.html + mesh_sim.wasm        │
+  │     |                              │
+  │     v                              │
+  │  ┌───────────────────────────┐     │
+  │  │  Node A ──> Channel ──>   │     │
+  │  │             (AWGN sim)    │     │
+  │  │         <── Channel <── B │     │
+  │  └───────────────────────────┘     │
+  │     |                              │
+  │     v                              │
+  │  [spectrum] [waterfall] [messages] │
+  │                                    │
+  │  No server, no RF, no internet     │
+  └────────────────────────────────────┘
+```
+
 ### Build and serve locally
 
 ```sh
 make wasm-serve
 ```
 
-Open `http://localhost:3000`.  The simulation runs entirely client-side —
-no server, no RF, no internet.  Useful for:
+Open `http://localhost:3000`.  The simulation runs entirely client-side.
+Useful for:
 
 - Demos and presentations
 - Teaching LoRa modulation (watch the chirps form on the waterfall)
