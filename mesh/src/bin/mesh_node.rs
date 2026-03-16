@@ -1,31 +1,37 @@
-/// Headless Meshtastic node — stdin/stdout text messaging over simulated or
+/// Headless Meshtastic node — text or serial-protobuf I/O over simulated or
 /// real RF (UHD).
 ///
-/// Lines read from stdin are transmitted as TEXT_MESSAGE_APP broadcasts.
-/// Received messages and events are printed to stdout.
+/// **Text mode** (default): lines from stdin → TEXT_MESSAGE_APP broadcasts.
+/// Received messages printed to stdout as `[RX] !aabb1234: "text"`.
+///
+/// **Serial mode** (`--serial`): speaks the Meshtastic serial protobuf framing
+/// protocol on stdin/stdout (binary).  Compatible with the Meshtastic Python
+/// CLI, web client, and mobile apps (via a serial-over-USB bridge).
 ///
 /// Usage:
 ///   cargo run --bin mesh_node [OPTIONS]
 ///
 /// Options:
-///   --name <SHORT>      Short name (≤4 chars, default: "MRST")
-///   --long <LONG>       Long name (default: "meshtastic-rs")
-///   --sf <7..12>        Spreading factor (default: 11)
-///   --preset <name>     Modem preset name (e.g. "LongFast")
-///   --uhd               Use UHD (USRP) driver instead of simulated channel
-///   --freq <MHz>        UHD center frequency (default: 906.875)
-///   --args <str>        UHD device args (default: "")
-///   --tx-gain <dB>      UHD TX gain (default: 40)
-///   --rx-gain <dB>      UHD RX gain (default: 40)
-///   --signal <dBFS>     Sim signal level (default: -20)
-///   --noise <dBFS>      Sim noise level (default: -60)
+///   --serial              Serial protobuf mode (binary stdin/stdout)
+///   --name <SHORT>        Short name (≤4 chars, default: "MRST")
+///   --long <LONG>         Long name (default: "meshtastic-rs")
+///   --sf <7..12>          Spreading factor (default: 11)
+///   --preset <name>       Modem preset name (e.g. "LongFast")
+///   --uhd                 Use UHD (USRP) driver
+///   --freq <MHz>          UHD center frequency (default: 906.875)
+///   --args <str>          UHD device args (default: "")
+///   --tx-gain <dB>        UHD TX gain (default: 40)
+///   --rx-gain <dB>        UHD RX gain (default: 40)
+///   --signal <dBFS>       Sim signal level (default: -20)
+///   --noise <dBFS>        Sim noise level (default: -60)
 
 use std::{
-    io::{self, BufRead, Write},
+    io::{self, BufRead, Read, Write},
     sync::{Arc, atomic::{AtomicBool, Ordering}},
     time::{Duration, Instant},
 };
 
+use prost::Message as _;
 use lora::channel::{Channel, Driver};
 use lora::modem::{Tx, Rx};
 use rustfft::num_complex::Complex;
@@ -33,12 +39,20 @@ use rustfft::num_complex::Complex;
 use lora::uhd::UhdDevice;
 
 use mesh::{
-    app::{ChannelConfig, MeshNode},
+    app::{ChannelConfig, MeshMessage, MeshNode},
     mac::packet::BROADCAST,
-    presets::{PRESETS, preset_by_name},
+    presets::preset_by_name,
+    proto::{
+        User,
+        radio::{
+            MeshPacket, MyNodeInfo, NodeInfoProto, FromRadio, ToRadio,
+            from_radio, to_radio, mesh_packet,
+        },
+    },
+    serial,
 };
 
-// ── Defaults ─────────────────────────────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────────────────────────
 
 const OS_FACTOR: u32 = 4;
 const CR: u8 = 4;
@@ -47,21 +61,23 @@ const PREAMBLE: u16 = 16;
 const SR_HZ: u64 = 1_000_000;
 const TICK: Duration = Duration::from_millis(16);
 const MAX_RX_BUF: usize = 4_000_000;
-const BEACON_INTERVAL: u64 = 15 * SR_HZ; // 15 s (longer than sim)
+const BEACON_INTERVAL: u64 = 15 * SR_HZ;
+const FIRMWARE_VERSION: &str = "meshtastic-rs 0.1.0";
 
 fn db_to_amp(db: f32) -> f32 { 10_f32.powf(db / 20.0) }
 
-// ── CLI args (simple hand-rolled parser) ─────────────────────────────────────
+// ── CLI args ─────────────────────────────────────────────────────────────────
 
 struct Config {
-    short_name: String,
-    long_name:  String,
-    sf:         u8,
-    signal_db:  f32,
-    noise_db:   f32,
-    use_uhd:    bool,
+    serial_mode: bool,
+    short_name:  String,
+    long_name:   String,
+    sf:          u8,
+    signal_db:   f32,
+    noise_db:    f32,
+    use_uhd:     bool,
     uhd_freq_mhz: f64,
-    uhd_args:   String,
+    uhd_args:    String,
     uhd_tx_gain: f64,
     uhd_rx_gain: f64,
 }
@@ -69,14 +85,15 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            short_name: "MRST".into(),
-            long_name:  "meshtastic-rs".into(),
-            sf:         11,
-            signal_db:  -20.0,
-            noise_db:   -60.0,
-            use_uhd:    false,
+            serial_mode: false,
+            short_name:  "MRST".into(),
+            long_name:   "meshtastic-rs".into(),
+            sf:          11,
+            signal_db:   -20.0,
+            noise_db:    -60.0,
+            use_uhd:     false,
             uhd_freq_mhz: 906.875,
-            uhd_args:   String::new(),
+            uhd_args:    String::new(),
             uhd_tx_gain: 40.0,
             uhd_rx_gain: 40.0,
         }
@@ -89,6 +106,7 @@ fn parse_args() -> Config {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--serial"  => { cfg.serial_mode = true; }
             "--name"    => { i += 1; cfg.short_name = args[i].clone(); }
             "--long"    => { i += 1; cfg.long_name  = args[i].clone(); }
             "--sf"      => { i += 1; cfg.sf         = args[i].parse().unwrap_or(11); }
@@ -120,15 +138,11 @@ fn make_driver(cfg: &Config) -> Box<dyn Driver> {
         let sr_hz = SR_HZ as f64;
         let bw_hz = sr_hz / OS_FACTOR as f64;
         match UhdDevice::new(
-            &cfg.uhd_args,
-            cfg.uhd_freq_mhz * 1e6,
-            sr_hz, bw_hz,
-            cfg.uhd_rx_gain, cfg.uhd_tx_gain,
+            &cfg.uhd_args, cfg.uhd_freq_mhz * 1e6,
+            sr_hz, bw_hz, cfg.uhd_rx_gain, cfg.uhd_tx_gain,
         ) {
             Ok(dev) => return Box::new(dev),
-            Err(e)  => {
-                eprintln!("[uhd] open failed: {e} — falling back to sim");
-            }
+            Err(e)  => eprintln!("[uhd] open failed: {e} — falling back to sim"),
         }
     }
     #[cfg(not(feature = "uhd"))]
@@ -141,41 +155,213 @@ fn make_driver(cfg: &Config) -> Box<dyn Driver> {
     Box::new(Channel::new(noise_sigma, signal_amp))
 }
 
-// ── Main loop ────────────────────────────────────────────────────────────────
+// ── Serial-mode helpers ──────────────────────────────────────────────────────
 
-fn main() {
-    let cfg = parse_args();
+/// Send a FromRadio message to stdout with serial framing.
+fn send_from_radio(out: &mut impl Write, msg: &FromRadio) {
+    let pb = msg.encode_to_vec();
+    if let Some(frame) = serial::encode(&pb) {
+        let _ = out.write_all(&frame);
+        let _ = out.flush();
+    }
+}
 
+/// Convert a received MeshMessage to a FromRadio packet.
+fn msg_to_from_radio(msg: &MeshMessage, seq: &mut u32) -> FromRadio {
+    *seq += 1;
+    FromRadio {
+        id: *seq,
+        payload_variant: Some(from_radio::PayloadVariant::Packet(MeshPacket {
+            from:      msg.from,
+            to:        msg.to,
+            id:        0,
+            channel:   0,
+            rx_time:   0,
+            rx_snr:    0.0,
+            hop_limit: msg.hop_limit as u32,
+            want_ack:  false,
+            rx_rssi:   0,
+            payload_variant: Some(mesh_packet::PayloadVariant::Decoded(msg.data.clone())),
+        })),
+    }
+}
+
+/// Handle the config handshake: send MyNodeInfo, all known nodes, config_complete.
+fn send_config(
+    out:     &mut impl Write,
+    node:    &MeshNode,
+    cfg:     &Config,
+    want_id: u32,
+    seq:     &mut u32,
+) {
+    // MyNodeInfo
+    *seq += 1;
+    send_from_radio(out, &FromRadio {
+        id: *seq,
+        payload_variant: Some(from_radio::PayloadVariant::MyInfo(MyNodeInfo {
+            my_node_num:      node.node_id(),
+            max_channels:     8,
+            firmware_version: FIRMWARE_VERSION.into(),
+        })),
+    });
+
+    // Our own NodeInfo
+    *seq += 1;
+    send_from_radio(out, &FromRadio {
+        id: *seq,
+        payload_variant: Some(from_radio::PayloadVariant::NodeInfo(NodeInfoProto {
+            num:  node.node_id(),
+            user: Some(User {
+                id:         format!("!{:08x}", node.node_id()),
+                long_name:  cfg.long_name.clone(),
+                short_name: cfg.short_name.clone(),
+                macaddr:    Vec::new(),
+            }),
+            snr:        0.0,
+            last_heard: 0,
+        })),
+    });
+
+    // Known neighbours
+    for n in node.neighbours() {
+        *seq += 1;
+        send_from_radio(out, &FromRadio {
+            id: *seq,
+            payload_variant: Some(from_radio::PayloadVariant::NodeInfo(NodeInfoProto {
+                num:  n.node_id,
+                user: Some(User {
+                    id:         format!("!{:08x}", n.node_id),
+                    long_name:  n.long_name.clone(),
+                    short_name: n.short_name.clone(),
+                    macaddr:    Vec::new(),
+                }),
+                snr:        0.0,
+                last_heard: 0,
+            })),
+        });
+    }
+
+    // ConfigComplete
+    *seq += 1;
+    send_from_radio(out, &FromRadio {
+        id: *seq,
+        payload_variant: Some(from_radio::PayloadVariant::ConfigCompleteId(want_id)),
+    });
+}
+
+/// Process a decoded ToRadio message.  Returns an optional MeshFrame to TX.
+fn handle_to_radio(
+    to_radio: &ToRadio,
+    node:     &MeshNode,
+    out:      &mut impl Write,
+    cfg:      &Config,
+    seq:      &mut u32,
+) -> Option<mesh::mac::packet::MeshFrame> {
+    let variant = to_radio.payload_variant.as_ref()?;
+    match variant {
+        to_radio::PayloadVariant::WantConfigId(want_id) => {
+            send_config(out, node, cfg, *want_id, seq);
+            None
+        }
+        to_radio::PayloadVariant::Packet(pkt) => {
+            // Extract Data from the packet.
+            let data = match pkt.payload_variant.as_ref()? {
+                mesh_packet::PayloadVariant::Decoded(d) => d.clone(),
+                mesh_packet::PayloadVariant::Encrypted(_) => {
+                    eprintln!("[serial] ignoring encrypted ToRadio packet");
+                    return None;
+                }
+            };
+            let to = if pkt.to == 0 { BROADCAST } else { pkt.to };
+            node.build_frame(to, &data)
+        }
+    }
+}
+
+// ── PHY RX handler (shared between modes) ────────────────────────────────────
+
+struct PhyState {
+    rx_buffer: Vec<Complex<f32>>,
+    produced:  u64,
+    next_beacon_at: u64,
+}
+
+impl PhyState {
+    fn new() -> Self {
+        Self {
+            rx_buffer: Vec::new(),
+            produced:  0,
+            next_beacon_at: SR_HZ,
+        }
+    }
+}
+
+/// Run one tick: push beacons, tick driver, decode RX, return decoded messages.
+fn tick_phy(
+    state:    &mut PhyState,
+    node:     &mut MeshNode,
+    driver:   &mut Box<dyn Driver>,
+    tx_modem: &Tx,
+    rx_modem: &Rx,
+    samples_per_tick: usize,
+) -> Vec<(Option<MeshMessage>, Option<mesh::mac::packet::MeshFrame>)> {
+    // NodeInfo beacon
+    if state.produced >= state.next_beacon_at {
+        state.next_beacon_at = state.produced + BEACON_INTERVAL;
+        if let Some(frame) = node.build_nodeinfo_frame() {
+            driver.push_samples(tx_modem.modulate(&frame.to_bytes()));
+        }
+    }
+
+    // Tick driver
+    let mixed = driver.tick(samples_per_tick);
+    state.produced += mixed.len() as u64;
+
+    // RX decode
+    state.rx_buffer.extend_from_slice(&mixed);
+    if state.rx_buffer.len() > MAX_RX_BUF {
+        let drain = state.rx_buffer.len() - MAX_RX_BUF / 2;
+        state.rx_buffer.drain(..drain);
+    }
+
+    let mut results = Vec::new();
+    loop {
+        match rx_modem.decode_streaming(&state.rx_buffer) {
+            Some((payload, consumed)) => {
+                state.rx_buffer.drain(..consumed);
+                match node.process_rx_frame(&payload) {
+                    Ok(pair) => results.push(pair),
+                    Err(e)   => eprintln!("[err] {e}"),
+                }
+            }
+            None => break,
+        }
+    }
+    results
+}
+
+// ── Text mode ────────────────────────────────────────────────────────────────
+
+fn run_text_mode(cfg: Config) {
     let channel_cfg = ChannelConfig::default();
     let mut node = MeshNode::with_identity(channel_cfg, &cfg.short_name, &cfg.long_name);
 
     eprintln!("node !{:08x}  name={}/{}  sf={}  driver={}",
         node.node_id(), cfg.short_name, cfg.long_name, cfg.sf,
         if cfg.use_uhd { "uhd" } else { "sim" });
-    if cfg.use_uhd {
-        eprintln!("  freq={:.3} MHz  tx_gain={:.0} dB  rx_gain={:.0} dB  args=\"{}\"",
-            cfg.uhd_freq_mhz, cfg.uhd_tx_gain, cfg.uhd_rx_gain, cfg.uhd_args);
-    } else {
-        eprintln!("  signal={:.0} dBFS  noise={:.0} dBFS  snr={:.0} dB",
-            cfg.signal_db, cfg.noise_db, cfg.signal_db - cfg.noise_db);
-    }
     eprintln!("type a line and press Enter to transmit (Ctrl-D to quit)");
 
     let mut driver = make_driver(&cfg);
     let tx_modem = Tx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
     let rx_modem = Rx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-
     let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
 
-    let mut rx_buffer: Vec<Complex<f32>> = Vec::new();
-    let mut produced: u64 = 0;
-    let mut next_beacon_at: u64 = SR_HZ; // first beacon after 1 s
+    let mut phy = PhyState::new();
 
-    // Non-blocking stdin.
+    // Non-blocking stdin reader.
     let running = Arc::new(AtomicBool::new(true));
     let running2 = running.clone();
     let (tx_lines, rx_lines) = std::sync::mpsc::channel::<String>();
-
     std::thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -191,11 +377,10 @@ fn main() {
     while running.load(Ordering::Relaxed) {
         let tick_start = Instant::now();
 
-        // ── TX: drain stdin lines ────────────────────────────────────────
+        // TX from stdin
         while let Ok(line) = rx_lines.try_recv() {
             if let Some(frame) = node.build_text_frame(BROADCAST, &line) {
-                let iq = tx_modem.modulate(&frame.to_bytes());
-                driver.push_samples(iq);
+                driver.push_samples(tx_modem.modulate(&frame.to_bytes()));
                 println!("[TX] \"{}\"", line);
                 io::stdout().flush().ok();
             } else {
@@ -203,68 +388,114 @@ fn main() {
             }
         }
 
-        // ── NodeInfo beacon ──────────────────────────────────────────────
-        if produced >= next_beacon_at {
-            next_beacon_at = produced + BEACON_INTERVAL;
-            if let Some(frame) = node.build_nodeinfo_frame() {
-                let iq = tx_modem.modulate(&frame.to_bytes());
-                driver.push_samples(iq);
-            }
-        }
-
-        // ── Tick driver ──────────────────────────────────────────────────
-        let mixed = driver.tick(samples_per_tick);
-        produced += mixed.len() as u64;
-
-        // ── RX decode ────────────────────────────────────────────────────
-        rx_buffer.extend_from_slice(&mixed);
-
-        if rx_buffer.len() > MAX_RX_BUF {
-            let drain = rx_buffer.len() - MAX_RX_BUF / 2;
-            rx_buffer.drain(..drain);
-        }
-
-        loop {
-            match rx_modem.decode_streaming(&rx_buffer) {
-                Some((payload, consumed)) => {
-                    rx_buffer.drain(..consumed);
-                    match node.process_rx_frame(&payload) {
-                        Ok((Some(msg), fwd)) => {
-                            if let Some(t) = msg.data.text() {
-                                println!("[RX] !{:08x}: \"{}\"  (hops={})",
-                                    msg.from, t, msg.hop_limit);
-                            } else {
-                                println!("[RX] !{:08x}: portnum={} len={}",
-                                    msg.from, msg.data.portnum, msg.data.payload.len());
-                            }
-                            io::stdout().flush().ok();
-
-                            // Forward if needed.
-                            if let Some(fwd_frame) = fwd {
-                                let iq = tx_modem.modulate(&fwd_frame.to_bytes());
-                                driver.push_samples(iq);
-                                eprintln!("[fwd] relayed packet from !{:08x}", msg.from);
-                            }
-                        }
-                        Ok((None, Some(fwd_frame))) => {
-                            let iq = tx_modem.modulate(&fwd_frame.to_bytes());
-                            driver.push_samples(iq);
-                            eprintln!("[fwd] relayed packet (not for us)");
-                        }
-                        Ok((None, None)) => {} // dup or drop
-                        Err(e) => eprintln!("[err] {e}"),
-                    }
+        // PHY tick
+        for (msg, fwd) in tick_phy(&mut phy, &mut node, &mut driver, &tx_modem, &rx_modem, samples_per_tick) {
+            if let Some(ref m) = msg {
+                if let Some(t) = m.data.text() {
+                    println!("[RX] !{:08x}: \"{}\"  (hops={})", m.from, t, m.hop_limit);
+                } else {
+                    println!("[RX] !{:08x}: portnum={} len={}", m.from, m.data.portnum, m.data.payload.len());
                 }
-                None => break,
+                io::stdout().flush().ok();
+            }
+            if let Some(fwd_frame) = fwd {
+                driver.push_samples(tx_modem.modulate(&fwd_frame.to_bytes()));
+                eprintln!("[fwd] relayed packet");
             }
         }
 
-        // Sleep remainder of tick.
         let elapsed = tick_start.elapsed();
         if let Some(remaining) = TICK.checked_sub(elapsed) {
             std::thread::sleep(remaining);
         }
     }
-
     eprintln!("stdin closed, exiting");
+}
+
+// ── Serial mode ──────────────────────────────────────────────────────────────
+
+fn run_serial_mode(cfg: Config) {
+    let channel_cfg = ChannelConfig::default();
+    let mut node = MeshNode::with_identity(channel_cfg, &cfg.short_name, &cfg.long_name);
+
+    eprintln!("[serial] node !{:08x}  sf={}  driver={}",
+        node.node_id(), cfg.sf, if cfg.use_uhd { "uhd" } else { "sim" });
+
+    let mut driver = make_driver(&cfg);
+    let tx_modem = Tx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let rx_modem = Rx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
+
+    let mut phy = PhyState::new();
+    let mut decoder = serial::StreamDecoder::new();
+    let mut from_radio_seq: u32 = 0;
+
+    // Non-blocking binary stdin reader.
+    let running = Arc::new(AtomicBool::new(true));
+    let running2 = running.clone();
+    let (tx_bytes, rx_bytes) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        let mut buf = [0u8; 1024];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => { if tx_bytes.send(buf[..n].to_vec()).is_err() { break; } }
+                Err(_) => break,
+            }
+        }
+        running2.store(false, Ordering::Relaxed);
+    });
+
+    let mut stdout = io::stdout().lock();
+
+    while running.load(Ordering::Relaxed) {
+        let tick_start = Instant::now();
+
+        // ── Process incoming serial bytes ────────────────────────────────
+        while let Ok(chunk) = rx_bytes.try_recv() {
+            decoder.push(&chunk);
+        }
+        while let Some(pb_bytes) = decoder.next_frame() {
+            match ToRadio::decode(pb_bytes.as_slice()) {
+                Ok(to_radio) => {
+                    if let Some(frame) = handle_to_radio(&to_radio, &node, &mut stdout, &cfg, &mut from_radio_seq) {
+                        driver.push_samples(tx_modem.modulate(&frame.to_bytes()));
+                        eprintln!("[serial] TX frame ({} bytes)", frame.payload.len());
+                    }
+                }
+                Err(e) => eprintln!("[serial] bad ToRadio: {e}"),
+            }
+        }
+
+        // ── PHY tick ─────────────────────────────────────────────────────
+        for (msg, fwd) in tick_phy(&mut phy, &mut node, &mut driver, &tx_modem, &rx_modem, samples_per_tick) {
+            if let Some(ref m) = msg {
+                let fr = msg_to_from_radio(m, &mut from_radio_seq);
+                send_from_radio(&mut stdout, &fr);
+                eprintln!("[serial] RX from !{:08x} portnum={}", m.from, m.data.portnum);
+            }
+            if let Some(fwd_frame) = fwd {
+                driver.push_samples(tx_modem.modulate(&fwd_frame.to_bytes()));
+                eprintln!("[serial] fwd");
+            }
+        }
+
+        let elapsed = tick_start.elapsed();
+        if let Some(remaining) = TICK.checked_sub(elapsed) {
+            std::thread::sleep(remaining);
+        }
+    }
+    eprintln!("[serial] stdin closed, exiting");
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+
+fn main() {
+    let cfg = parse_args();
+    if cfg.serial_mode {
+        run_serial_mode(cfg);
+    } else {
+        run_text_mode(cfg);
+    }
 }

@@ -64,9 +64,11 @@ meshtastic-lora-rs/
 │       │   ├── router.rs    — stateless flood router + DedupCache
 │       │   └── node.rs      — LocalNode, NodeInfo, NeighbourTable
 │       ├── proto/
-│       │   └── mod.rs       — Data, User, PortNum (hand-written prost)
+│       │   ├── mod.rs       — Data, User, PortNum (hand-written prost)
+│       │   └── radio.rs     — MeshPacket, FromRadio, ToRadio, MyNodeInfo
 │       ├── presets.rs       — ModemPreset + all 9 Meshtastic presets
 │       ├── app.rs           — MeshNode public API
+│       ├── serial.rs        — serial framing (magic + length-prefix)
 │       └── bin/
 │           ├── mesh_sim.rs  — two-node egui simulation binary
 │           └── mesh_node.rs — headless node (stdin/stdout + UHD)
@@ -146,13 +148,22 @@ cargo run --bin mesh_node
 cargo run --bin mesh_node -- --uhd --freq 906.875
 ```
 
-### B — Serial protobuf API
+### B — Serial protobuf API (implemented)
 
-Implement the Meshtastic serial framing protocol over a virtual serial port
-(or raw USB CDC).  Requires generating the full `FromRadio` / `ToRadio`
-protobuf types from the official
-[meshtastic/protobufs](https://github.com/meshtastic/protobufs) repo
-(add as a second git submodule, compile with `prost-build`).
+The `--serial` flag on `mesh_node` enables the Meshtastic serial framing
+protocol (`[0x94 0xC3] [len_u16_be] [protobuf]`) on stdin/stdout.  The
+node speaks `FromRadio` / `ToRadio` and responds to config handshakes
+(`want_config_id` → `my_info` + `node_info` + `config_complete_id`).
+
+```sh
+cargo run --bin mesh_node -- --serial
+```
+
+Hand-written prost types cover `MeshPacket`, `FromRadio`, `ToRadio`,
+`MyNodeInfo`, `NodeInfoProto`.  For full Meshtastic toolchain compatibility,
+swap to prost-build with the official
+[meshtastic/protobufs](https://github.com/meshtastic/protobufs) as a
+submodule.
 
 ### C — MQTT bridge
 

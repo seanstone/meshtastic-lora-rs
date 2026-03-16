@@ -6,6 +6,9 @@ run:
 run-node:
 	cargo run --bin mesh_node
 
+run-node-serial:
+	cargo run --bin mesh_node -- --serial
+
 run-node-uhd:
 	cargo run --bin mesh_node -- --uhd --freq 906.875
 

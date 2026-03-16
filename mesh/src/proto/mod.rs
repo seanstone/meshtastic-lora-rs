@@ -1,8 +1,10 @@
 /// Hand-written prost types mirroring the Meshtastic protobuf schema.
 ///
 /// Source of truth: <https://github.com/meshtastic/protobufs>
-/// Only the subset needed by Phases 5–6 is implemented here.
+/// Only the subset needed by the current implementation is included.
 /// When the full proto corpus is needed, replace with prost-build output.
+
+pub mod radio;
 
 /// Destination port numbers (meshtastic/mesh.proto `PortNum`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
