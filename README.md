@@ -205,6 +205,20 @@ share the same PHY tick loop and `MeshNode` instance.
 
 ## Roadmap
 
+### mesh_sim → RF communications terminal
+
+| # | Change | Status |
+|---|--------|--------|
+| 1 | Auto-TX toggle + manual TX queue + text input / Send button | done |
+| 2 | Operating mode: TwoNodeTest (current) vs Terminal (single-node, real RF) | pending |
+| 3 | Enhanced message log — timestamps, direction (TX/RX/FWD), from-ID, hops, colour | pending |
+| 4 | Forward handling — re-modulate + relay `Option<MeshFrame>` from `process_rx_frame` | pending |
+| 5 | Node identity config — short/long name fields in Terminal mode | pending |
+| 6 | PER enhancements — colour-coded label, rolling window | pending |
+| 7 | Destination selector — broadcast or unicast to neighbour | pending |
+
+### Other
+
 | Interface | What it enables |
 |-----------|-----------------|
 | BLE GATT service (`6ba1b218-…`) | Direct Android / iOS Meshtastic app connection |

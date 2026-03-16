@@ -87,6 +87,9 @@ struct SimShared {
     rebuild_driver: AtomicBool,
     uhd_loading:    AtomicBool,
     uhd_warning:    Mutex<Option<String>>,
+
+    auto_tx:        AtomicBool,
+    tx_queue:       Mutex<VecDeque<String>>,
 }
 
 impl SimShared {
@@ -120,6 +123,8 @@ impl SimShared {
             rebuild_driver: AtomicBool::new(false),
             uhd_loading:    AtomicBool::new(false),
             uhd_warning:    Mutex::new(None),
+            auto_tx:        AtomicBool::new(true),
+            tx_queue:       Mutex::new(VecDeque::new()),
         })
     }
 }
@@ -323,8 +328,21 @@ async fn sim_loop(shared: Arc<SimShared>) {
                 .iter().map(|n| format!("{} (!{:08x})", n.short_name, n.node_id)).collect();
         }
 
-        // ── Text TX ──────────────────────────────────────────────────────
-        if produced >= next_tx_at {
+        // ── Manual TX (drain user-typed messages) ─────────────────────────
+        {
+            let manual: Vec<String> = shared.tx_queue.lock().unwrap().drain(..).collect();
+            for text in manual {
+                if let Some(frame) = node_a.build_text_frame(BROADCAST, &text) {
+                    shared.tx_count.fetch_add(1, Ordering::Relaxed);
+                    push_log(&shared, true, format!("TX A→* \"{text}\""));
+                    let iq = tx_modem.modulate(&frame.to_bytes());
+                    driver.push_samples(iq);
+                }
+            }
+        }
+
+        // ── Auto TX ─────────────────────────────────────────────────────────
+        if shared.auto_tx.load(Ordering::Relaxed) && produced >= next_tx_at {
             next_tx_at = produced + interval_samples;
             seq += 1;
             let text = format!("Hello from A #{seq}");
@@ -418,6 +436,8 @@ struct MeshSimApp {
     uhd_rx_gain_db:  f64,
     uhd_tx_gain_db:  f64,
     uhd_warning:     Option<String>,
+    auto_tx:         bool,
+    msg_input:       String,
 }
 
 impl MeshSimApp {
@@ -453,6 +473,8 @@ impl MeshSimApp {
             uhd_rx_gain_db:  40.0,
             uhd_tx_gain_db:  40.0,
             uhd_warning:     None,
+            auto_tx:         true,
+            msg_input:       String::new(),
         }
     }
 
@@ -471,6 +493,8 @@ impl MeshSimApp {
         *self.shared.signal_db.lock().unwrap()   = self.signal_db;
         *self.shared.noise_db.lock().unwrap()    = self.noise_db;
         *self.shared.interval_ms.lock().unwrap() = self.interval_ms;
+        self.auto_tx = true;
+        self.shared.auto_tx.store(true, Ordering::Relaxed);
     }
 
     fn reset_stats(&self) {
@@ -568,10 +592,15 @@ impl eframe::App for MeshSimApp {
             }
 
             ui.add_space(4.0);
-            ui.label(format!("Interval  {} ms", self.interval_ms));
-            if ui.add(egui::Slider::new(&mut self.interval_ms, 200_u64..=10000).show_value(false)).changed() {
-                *self.shared.interval_ms.lock().unwrap() = self.interval_ms;
+            if ui.checkbox(&mut self.auto_tx, "Auto TX").changed() {
+                self.shared.auto_tx.store(self.auto_tx, Ordering::Relaxed);
             }
+            ui.add_enabled_ui(self.auto_tx, |ui| {
+                ui.label(format!("Interval  {} ms", self.interval_ms));
+                if ui.add(egui::Slider::new(&mut self.interval_ms, 200_u64..=10000).show_value(false)).changed() {
+                    *self.shared.interval_ms.lock().unwrap() = self.interval_ms;
+                }
+            });
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -686,6 +715,20 @@ impl eframe::App for MeshSimApp {
             ui.separator();
 
             ui.heading("Mesh Messages");
+            ui.horizontal(|ui| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.msg_input)
+                        .hint_text("Type a message…")
+                        .desired_width(ui.available_width() - 55.0),
+                );
+                let enter = resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Send").clicked() || enter) && !self.msg_input.is_empty() {
+                    let text = std::mem::take(&mut self.msg_input);
+                    self.shared.tx_queue.lock().unwrap().push_back(text);
+                    resp.request_focus();
+                }
+            });
             ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .stick_to_bottom(true)
