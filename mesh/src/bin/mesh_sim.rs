@@ -68,10 +68,16 @@ async fn tick_sleep(remaining: Duration) {
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq)]
+enum MsgDir { Tx, Rx, Fwd, System, Error }
+
 #[derive(Clone)]
 struct LogEntry {
-    ok:   bool,
-    text: String,
+    time:     String,
+    dir:      MsgDir,
+    text:     String,
+    from_id:  Option<u32>,
+    hops:     Option<u8>,
 }
 
 struct SimShared {
@@ -148,9 +154,32 @@ impl SimShared {
 
 fn db_to_amp(db: f32) -> f32 { 10_f32.powf(db / 20.0) }
 
-fn push_log(shared: &SimShared, ok: bool, text: String) {
+fn now_hms() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        // UTC HH:MM:SS — avoids a chrono dependency.
+        let h = (t / 3600) % 24;
+        let m = (t / 60) % 60;
+        let s = t % 60;
+        format!("{h:02}:{m:02}:{s:02}")
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let d = js_sys::Date::new_0();
+        format!("{:02}:{:02}:{:02}",
+            d.get_hours(), d.get_minutes(), d.get_seconds())
+    }
+}
+
+fn push_log(shared: &SimShared, dir: MsgDir, text: String) {
+    push_log_ex(shared, dir, text, None, None);
+}
+
+fn push_log_ex(shared: &SimShared, dir: MsgDir, text: String, from_id: Option<u32>, hops: Option<u8>) {
     let mut log = shared.log.lock().unwrap();
-    log.push_back(LogEntry { ok, text });
+    log.push_back(LogEntry { time: now_hms(), dir, text, from_id, hops });
     if log.len() > MAX_LOG { log.pop_front(); }
 }
 
@@ -267,7 +296,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
         if shared.rebuild_nodes.swap(false, Ordering::Relaxed) {
             let new_mode = *shared.mode.lock().unwrap();
             nodes = build_nodes(new_mode, &shared);
-            push_log(&shared, true, match new_mode {
+            push_log(&shared, MsgDir::System, match new_mode {
                 SimMode::TwoNodeTest => "Mode → Two-Node Test".into(),
                 SimMode::Terminal    => "Mode → Terminal".into(),
             });
@@ -402,7 +431,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
             for text in manual {
                 if let Some(frame) = nodes.tx_node().build_text_frame(BROADCAST, &text) {
                     shared.tx_count.fetch_add(1, Ordering::Relaxed);
-                    push_log(&shared, true, format!("TX \"{text}\""));
+                    push_log(&shared, MsgDir::Tx, format!("\"{text}\""));
                     let iq = tx_modem.modulate(&frame.to_bytes());
                     driver.push_samples(iq);
                 }
@@ -417,7 +446,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
 
             if let Some(frame) = nodes.tx_node().build_text_frame(BROADCAST, &text) {
                 shared.tx_count.fetch_add(1, Ordering::Relaxed);
-                push_log(&shared, true, format!("TX \"{text}\""));
+                push_log(&shared, MsgDir::Tx, format!("\"{text}\""));
                 let iq = tx_modem.modulate(&frame.to_bytes());
                 driver.push_samples(iq);
             }
@@ -462,25 +491,25 @@ async fn sim_loop(shared: Arc<SimShared>) {
                         Ok((Some(msg), fwd)) => {
                             shared.rx_count.fetch_add(1, Ordering::Relaxed);
                             let label = if let Some(t) = msg.data.text() {
-                                format!("RX \"{}\" (from: !{:08x}, hops: {})", t, msg.from, msg.hop_limit)
+                                format!("\"{}\"", t)
                             } else {
-                                format!("RX portnum={} from !{:08x}", msg.data.portnum, msg.from)
+                                format!("portnum={} len={}", msg.data.portnum, msg.data.payload.len())
                             };
-                            push_log(&shared, true, label);
-                            // Forward relay if needed.
+                            push_log_ex(&shared, MsgDir::Rx, label,
+                                Some(msg.from), Some(msg.hop_limit));
                             if let Some(fwd_frame) = fwd {
                                 let iq = tx_modem.modulate(&fwd_frame.to_bytes());
                                 driver.push_samples(iq);
-                                push_log(&shared, true, "FWD relay".into());
+                                push_log(&shared, MsgDir::Fwd, "relay".into());
                             }
                         }
                         Ok((None, Some(fwd_frame))) => {
                             let iq = tx_modem.modulate(&fwd_frame.to_bytes());
                             driver.push_samples(iq);
-                            push_log(&shared, true, "FWD relay".into());
+                            push_log(&shared, MsgDir::Fwd, "relay".into());
                         }
                         Ok((None, None)) => {}
-                        Err(e) => push_log(&shared, false, format!("ERR: {e}")),
+                        Err(e) => push_log(&shared, MsgDir::Error, format!("{e}")),
                     }
                 }
                 None => break,
@@ -840,9 +869,22 @@ impl eframe::App for MeshSimApp {
                 .show(ui, |ui| {
                     let log = self.shared.log.lock().unwrap();
                     for entry in log.iter() {
-                        let color = if entry.ok { Color32::from_rgb(100, 220, 100) }
-                                    else        { Color32::from_rgb(220, 100, 100) };
-                        ui.label(RichText::new(&entry.text).color(color).monospace());
+                        let (prefix, color) = match entry.dir {
+                            MsgDir::Tx     => ("TX ", Color32::from_rgb(100, 180, 255)),
+                            MsgDir::Rx     => ("RX ", Color32::from_rgb(100, 220, 100)),
+                            MsgDir::Fwd    => ("FWD", Color32::from_rgb(255, 200, 80)),
+                            MsgDir::System => ("SYS", Color32::from_rgb(180, 180, 180)),
+                            MsgDir::Error  => ("ERR", Color32::from_rgb(220, 100, 100)),
+                        };
+                        let mut line = format!("[{}] {}", entry.time, prefix);
+                        if let Some(id) = entry.from_id {
+                            line.push_str(&format!(" !{:08x}", id));
+                        }
+                        line.push_str(&format!(" {}", entry.text));
+                        if let Some(h) = entry.hops {
+                            line.push_str(&format!(" (hops: {h})"));
+                        }
+                        ui.label(RichText::new(line).color(color).monospace());
                     }
                 });
         });
