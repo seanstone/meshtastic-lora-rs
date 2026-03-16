@@ -29,6 +29,9 @@ prost = "0.13"
 # Random node ID generation
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 
+# FFT for spectrum analyzer (used by mesh_sim binary via lora::ui types)
+rustfft = "6"
+
 # Async runtime (native only)
 tokio = { version = "1", default-features = false, optional = true }
 

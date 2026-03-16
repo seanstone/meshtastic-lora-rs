@@ -1,8 +1,8 @@
-/// Two-node Meshtastic simulation with egui GUI.
+/// Two-node Meshtastic simulation with egui GUI, spectrum & waterfall.
 ///
-/// Node A and Node B share an in-memory AWGN channel.  Node A sends text
-/// messages and NodeInfo beacons; Node B relays back its own NodeInfo.
-/// Both nodes update their neighbour tables from received beacons.
+/// Node A and Node B share an in-memory AWGN channel.  The sim runs a
+/// continuous tick-based loop so the spectrum/waterfall show the noise floor
+/// between packets and the LoRa chirps during transmission.
 ///
 /// Run with:
 ///   cargo run --bin mesh_sim
@@ -10,14 +10,16 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    time::Duration,
     thread,
 };
 
 use eframe::egui::{self, Color32, RichText, ScrollArea};
+use rustfft::num_complex::Complex;
 use lora::channel::Channel;
 use lora::modem::{Tx, Rx};
+use lora::ui::{Chart, SpectrumPlot, WaterfallPlot, SpectrumAnalyzer};
 
 use mesh::{
     app::{ChannelConfig, MeshNode},
@@ -25,7 +27,24 @@ use mesh::{
     presets::{PRESETS, ModemPreset},
 };
 
-// ── Shared state ──────────────────────────────────────────────────────────────
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const MAX_LOG: usize = 200;
+const OS_FACTOR: u32 = 4;
+const CR: u8 = 4;
+const SYNC_WORD: u8 = 0x2B;
+const PREAMBLE: u16 = 16;
+const FFT_SIZE: usize = 2048;
+/// Sim sample rate = BW × OS = 250 kHz × 4 = 1 MHz.
+const SR_HZ: u64 = 1_000_000;
+/// Sim tick period (~60 fps).
+const TICK: Duration = Duration::from_millis(16);
+/// Max RX buffer size before we start draining (avoid unbounded growth).
+const MAX_RX_BUF: usize = 4_000_000;
+/// NodeInfo beacon interval in samples.
+const BEACON_INTERVAL: u64 = 5 * SR_HZ;
+
+// ── Shared state ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct LogEntry {
@@ -35,70 +54,82 @@ struct LogEntry {
 
 struct SimShared {
     running:     AtomicBool,
-    /// Spreading factor (7–12).
     sf:          Mutex<u8>,
-    /// Signal amplitude in dB (TX level through channel).
     signal_db:   Mutex<f32>,
-    /// Noise sigma in dB.
     noise_db:    Mutex<f32>,
-    /// TX interval in milliseconds.
     interval_ms: Mutex<u64>,
-    /// Message log (newest last).
     log:         Mutex<VecDeque<LogEntry>>,
-    /// Snapshot of Node A's neighbour table.
     a_neighbours: Mutex<Vec<String>>,
-    /// Snapshot of Node B's neighbour table.
     b_neighbours: Mutex<Vec<String>>,
-    /// Human-readable IDs for the two nodes.
-    a_id: Mutex<String>,
-    b_id: Mutex<String>,
-    /// Packets sent / received counters.
-    tx_count: Mutex<usize>,
-    rx_count: Mutex<usize>,
+    a_id:        Mutex<String>,
+    b_id:        Mutex<String>,
+    tx_count:    AtomicU64,
+    rx_count:    AtomicU64,
+
+    // Visualization.
+    spectrum_plot:  Arc<SpectrumPlot>,
+    waterfall_plot: Arc<WaterfallPlot>,
 }
 
 impl SimShared {
     fn new() -> Arc<Self> {
+        let init_spec: Vec<[f64; 2]> = (0..FFT_SIZE).map(|i| [i as f64, -80.0]).collect();
+        let spectrum_plot  = SpectrumPlot::new("Spectrum",   init_spec.clone(), -80.0, 80.0);
+        let waterfall_plot = WaterfallPlot::new("Waterfall", init_spec,         -80.0);
+
         Arc::new(Self {
-            running:     AtomicBool::new(true),
-            sf:          Mutex::new(7),
-            signal_db:   Mutex::new(-20.0),
-            noise_db:    Mutex::new(-60.0),
-            interval_ms: Mutex::new(1500),
-            log:         Mutex::new(VecDeque::new()),
+            running:      AtomicBool::new(true),
+            sf:           Mutex::new(11),
+            signal_db:    Mutex::new(-20.0),
+            noise_db:     Mutex::new(-60.0),
+            interval_ms:  Mutex::new(2000),
+            log:          Mutex::new(VecDeque::new()),
             a_neighbours: Mutex::new(vec![]),
             b_neighbours: Mutex::new(vec![]),
-            a_id: Mutex::new(String::new()),
-            b_id: Mutex::new(String::new()),
-            tx_count: Mutex::new(0),
-            rx_count: Mutex::new(0),
+            a_id:         Mutex::new(String::new()),
+            b_id:         Mutex::new(String::new()),
+            tx_count:     AtomicU64::new(0),
+            rx_count:     AtomicU64::new(0),
+            spectrum_plot,
+            waterfall_plot,
         })
     }
 }
 
-const MAX_LOG: usize = 200;
-const OS_FACTOR: u32 = 4;   // SR = 4 × BW (250 kHz × 4 = 1 MHz sample rate)
-const CR: u8 = 4;            // CR 4/8 — matches gui_sim default
-const SYNC_WORD: u8 = 0x2B; // Meshtastic
-const PREAMBLE: u16 = 16;   // Meshtastic default
-
 fn db_to_amp(db: f32) -> f32 { 10_f32.powf(db / 20.0) }
 
-// ── Simulation thread ─────────────────────────────────────────────────────────
+fn push_log(shared: &SimShared, ok: bool, text: String) {
+    let mut log = shared.log.lock().unwrap();
+    log.push_back(LogEntry { ok, text });
+    if log.len() > MAX_LOG { log.pop_front(); }
+}
+
+// ── Simulation thread ────────────────────────────────────────────────────────
 
 fn sim_thread(shared: Arc<SimShared>) {
     let channel_cfg = ChannelConfig::default();
 
-    let mut node_a = MeshNode::with_identity(channel_cfg.clone(), "MSIM", "Mesh-Sim Node A");
+    let node_a = MeshNode::with_identity(channel_cfg.clone(), "MSIM", "Mesh-Sim Node A");
     let mut node_b = MeshNode::with_identity(channel_cfg.clone(), "MRCV", "Mesh-Sim Node B");
 
-    // Publish node IDs to the GUI.
     *shared.a_id.lock().unwrap() = format!("!{:08x}", node_a.node_id());
     *shared.b_id.lock().unwrap() = format!("!{:08x}", node_b.node_id());
 
+    let mut channel = Channel::new(0.001, 0.1);
+    let mut analyzer = SpectrumAnalyzer::new(FFT_SIZE);
+
+    let mut tx_modem = Tx::new(11, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let mut rx_modem = Rx::new(11, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let mut cur_sf: u8 = 11;
+
+    let mut rx_buffer: Vec<Complex<f32>> = Vec::new();
+
+    let mut produced: u64 = 0;
     let mut seq: u32 = 0;
-    let mut last_tx = Instant::now();
-    let mut last_beacon = Instant::now();
+    let mut next_tx_at: u64 = SR_HZ; // first packet after 1 s warm-up
+    let mut next_beacon_at: u64 = SR_HZ / 2; // first beacon after 0.5 s
+
+    let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
 
     loop {
         if !shared.running.load(Ordering::Relaxed) {
@@ -106,119 +137,158 @@ fn sim_thread(shared: Arc<SimShared>) {
             continue;
         }
 
-        let sf          = *shared.sf.lock().unwrap();
-        let signal_amp  = db_to_amp(*shared.signal_db.lock().unwrap());
+        // ── Read params ──────────────────────────────────────────────────
+        let sf         = *shared.sf.lock().unwrap();
+        let signal_amp = db_to_amp(*shared.signal_db.lock().unwrap());
         let noise_sigma = db_to_amp(*shared.noise_db.lock().unwrap()) / std::f32::consts::SQRT_2;
         let interval_ms = *shared.interval_ms.lock().unwrap();
+        let interval_samples = interval_ms * SR_HZ / 1000;
 
-        let tx = Tx::new(sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-        let rx = Rx::new(sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+        channel.set_signal_amp(signal_amp);
+        channel.set_noise_sigma(noise_sigma);
 
-        // ── NodeInfo beacon every 5 s ────────────────────────────────────────
-        if last_beacon.elapsed() >= Duration::from_secs(5) {
-            last_beacon = Instant::now();
-
-            // Node A → Node B beacon.
-            if let Some(frame) = node_a.build_nodeinfo_frame() {
-                phy_transfer(&tx, &rx, frame.to_bytes(), signal_amp, noise_sigma,
-                             &mut node_b, "NodeInfo A→B", &shared);
-            }
-            // Node B → Node A beacon.
-            if let Some(frame) = node_b.build_nodeinfo_frame() {
-                phy_transfer(&tx, &rx, frame.to_bytes(), signal_amp, noise_sigma,
-                             &mut node_a, "NodeInfo B→A", &shared);
-            }
-
-            // Refresh neighbour snapshots.
-            *shared.a_neighbours.lock().unwrap() = node_a.neighbours()
-                .iter().map(|n| format!("{} ({})", n.short_name, format!("!{:08x}", n.node_id))).collect();
-            *shared.b_neighbours.lock().unwrap() = node_b.neighbours()
-                .iter().map(|n| format!("{} ({})", n.short_name, format!("!{:08x}", n.node_id))).collect();
+        // Rebuild modems if SF changed.
+        if sf != cur_sf {
+            cur_sf = sf;
+            tx_modem = Tx::new(sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+            rx_modem = Rx::new(sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+            rx_buffer.clear();
+            channel.clear();
         }
 
-        // ── Text message every interval_ms ───────────────────────────────────
-        if last_tx.elapsed() >= Duration::from_millis(interval_ms) {
-            last_tx = Instant::now();
+        // ── NodeInfo beacon ──────────────────────────────────────────────
+        if produced >= next_beacon_at {
+            next_beacon_at = produced + BEACON_INTERVAL;
+
+            if let Some(frame) = node_a.build_nodeinfo_frame() {
+                let iq = tx_modem.modulate(&frame.to_bytes());
+                channel.push_samples(iq);
+            }
+            if let Some(frame) = node_b.build_nodeinfo_frame() {
+                let iq = tx_modem.modulate(&frame.to_bytes());
+                channel.push_samples(iq);
+            }
+
+            *shared.a_neighbours.lock().unwrap() = node_a.neighbours()
+                .iter().map(|n| format!("{} (!{:08x})", n.short_name, n.node_id)).collect();
+            *shared.b_neighbours.lock().unwrap() = node_b.neighbours()
+                .iter().map(|n| format!("{} (!{:08x})", n.short_name, n.node_id)).collect();
+        }
+
+        // ── Text TX ──────────────────────────────────────────────────────
+        if produced >= next_tx_at {
+            next_tx_at = produced + interval_samples;
             seq += 1;
             let text = format!("Hello from A #{seq}");
 
             if let Some(frame) = node_a.build_text_frame(BROADCAST, &text) {
-                *shared.tx_count.lock().unwrap() += 1;
+                shared.tx_count.fetch_add(1, Ordering::Relaxed);
                 push_log(&shared, true, format!("TX A→* \"{text}\""));
-
-                phy_transfer(&tx, &rx, frame.to_bytes(), signal_amp, noise_sigma,
-                             &mut node_b, &text, &shared);
+                let iq = tx_modem.modulate(&frame.to_bytes());
+                channel.push_samples(iq);
             }
         }
 
-        thread::sleep(Duration::from_millis(10));
-    }
-}
+        // ── Tick channel → mixed IQ ──────────────────────────────────────
+        let mixed = channel.tick(samples_per_tick);
+        produced += samples_per_tick as u64;
 
-/// Modulate `raw` through the AWGN channel, attempt decode on `dest` node.
-fn phy_transfer(
-    tx:         &Tx,
-    rx:         &Rx,
-    raw:        Vec<u8>,
-    signal_amp: f32,
-    noise_sigma: f32,
-    dest:       &mut MeshNode,
-    _label:     &str,
-    shared:     &Arc<SimShared>,
-) {
-    let iq_clean = tx.modulate(&raw);
-    let n = iq_clean.len();
-
-    let mut channel = Channel::new(noise_sigma, signal_amp);
-    channel.push_samples(iq_clean);
-    let iq_mixed = channel.tick(n);
-
-    if let Some(decoded) = rx.decode(&iq_mixed) {
-        match dest.process_rx_frame(&decoded) {
-            Ok((Some(msg), _)) => {
-                *shared.rx_count.lock().unwrap() += 1;
-                let label = if let Some(t) = msg.data.text() {
-                    format!("RX *→{:08x} \"{}\" (hops left: {})",
-                        dest.node_id(), t, msg.hop_limit)
+        // ── FFT → spectrum & waterfall ───────────────────────────────────
+        let mut peak: Vec<[f64; 2]> = Vec::new();
+        for chunk in mixed.chunks(FFT_SIZE) {
+            if chunk.len() == FFT_SIZE {
+                let spec = analyzer.compute(chunk);
+                shared.waterfall_plot.update(spec.clone());
+                if peak.is_empty() {
+                    peak = spec;
                 } else {
-                    format!("RX portnum={} to={:08x}", msg.data.portnum, dest.node_id())
-                };
-                push_log(shared, true, label);
+                    for (p, s) in peak.iter_mut().zip(spec.iter()) {
+                        if s[1] > p[1] { p[1] = s[1]; }
+                    }
+                }
             }
-            Ok((None, _)) => {}
-            Err(e) => push_log(shared, false, format!("ERR: {e}")),
         }
-    } else {
-        push_log(shared, false, "PHY decode failed".into());
+        if !peak.is_empty() {
+            shared.spectrum_plot.update(peak);
+        }
+
+        // ── Streaming RX decode ──────────────────────────────────────────
+        rx_buffer.extend_from_slice(&mixed);
+
+        // Prevent unbounded growth.
+        if rx_buffer.len() > MAX_RX_BUF {
+            let drain = rx_buffer.len() - MAX_RX_BUF / 2;
+            rx_buffer.drain(..drain);
+        }
+
+        // Try to decode frames from the buffer.
+        loop {
+            match rx_modem.decode_streaming(&rx_buffer) {
+                Some((payload, consumed)) => {
+                    rx_buffer.drain(..consumed);
+                    // Route through Node B.
+                    match node_b.process_rx_frame(&payload) {
+                        Ok((Some(msg), _fwd)) => {
+                            shared.rx_count.fetch_add(1, Ordering::Relaxed);
+                            let label = if let Some(t) = msg.data.text() {
+                                format!("RX B←* \"{}\" (hops: {})", t, msg.hop_limit)
+                            } else {
+                                format!("RX portnum={} to B", msg.data.portnum)
+                            };
+                            push_log(&shared, true, label);
+                        }
+                        Ok((None, _)) => {}
+                        Err(e) => push_log(&shared, false, format!("ERR: {e}")),
+                    }
+                }
+                None => break,
+            }
+        }
+
+        thread::sleep(TICK);
     }
 }
 
-fn push_log(shared: &Arc<SimShared>, ok: bool, text: String) {
-    let mut log = shared.log.lock().unwrap();
-    log.push_back(LogEntry { ok, text });
-    if log.len() > MAX_LOG { log.pop_front(); }
-}
-
-// ── GUI ───────────────────────────────────────────────────────────────────────
+// ── GUI ──────────────────────────────────────────────────────────────────────
 
 struct MeshSimApp {
-    shared:   Arc<SimShared>,
-    sf:       u8,
-    signal_db: f32,
-    noise_db:  f32,
-    interval_ms: u64,
-    preset_idx:  usize,
+    shared:          Arc<SimShared>,
+    sf:              u8,
+    signal_db:       f32,
+    noise_db:        f32,
+    interval_ms:     u64,
+    preset_idx:      usize,
+    spectrum_chart:  Chart,
+    waterfall_chart: Chart,
 }
 
 impl MeshSimApp {
     fn new(shared: Arc<SimShared>) -> Self {
+        let mut spectrum_chart = Chart::new("spectrum");
+        spectrum_chart.set_x_limits([0.0, FFT_SIZE as f64]);
+        spectrum_chart.set_y_limits([-90.0, 50.0]);
+        spectrum_chart.set_link_axis("mesh_link", true, false);
+        spectrum_chart.set_link_cursor("mesh_link", true, false);
+        spectrum_chart.add(shared.spectrum_plot.clone());
+
+        let mut waterfall_chart = Chart::new("waterfall");
+        waterfall_chart.set_x_limits([0.0, FFT_SIZE as f64]);
+        waterfall_chart.set_y_limits([0.0, 1.0]);
+        waterfall_chart.set_link_axis("mesh_link", true, false);
+        waterfall_chart.set_link_cursor("mesh_link", true, false);
+        waterfall_chart.add(shared.waterfall_plot.clone());
+        let wf_secs = FFT_SIZE as f64 * 512.0 / SR_HZ as f64;
+        waterfall_chart.set_y_time_display(wf_secs);
+
         Self {
             shared,
-            sf: 7,
+            sf: 11,
             signal_db: -20.0,
             noise_db: -60.0,
-            interval_ms: 1500,
-            preset_idx: 0,
+            interval_ms: 2000,
+            preset_idx: 5, // LongFast
+            spectrum_chart,
+            waterfall_chart,
         }
     }
 
@@ -232,14 +302,14 @@ impl MeshSimApp {
 
 impl eframe::App for MeshSimApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(200));
+        ctx.request_repaint_after(Duration::from_millis(32));
 
-        // ── Left settings panel ──────────────────────────────────────────────
-        egui::SidePanel::left("settings").min_width(200.0).show(ctx, |ui| {
+        // ── Left settings panel ──────────────────────────────────────────
+        egui::SidePanel::left("settings").min_width(190.0).show(ctx, |ui| {
             ui.heading("Settings");
             ui.separator();
 
-            // Preset selector.
+            // Preset.
             ui.label("Preset");
             egui::ComboBox::from_id_salt("preset")
                 .selected_text(PRESETS[self.preset_idx].name)
@@ -252,15 +322,13 @@ impl eframe::App for MeshSimApp {
                     }
                 });
 
-            ui.add_space(6.0);
-
-            // SF (independent of preset for quick tuning).
+            ui.add_space(4.0);
             ui.label(format!("SF  {}", self.sf));
             if ui.add(egui::Slider::new(&mut self.sf, 7_u8..=12).show_value(false)).changed() {
                 *self.shared.sf.lock().unwrap() = self.sf;
             }
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.label(format!("Signal  {:.0} dB", self.signal_db));
             if ui.add(egui::Slider::new(&mut self.signal_db, -60.0_f32..=0.0).show_value(false)).changed() {
                 *self.shared.signal_db.lock().unwrap() = self.signal_db;
@@ -274,13 +342,13 @@ impl eframe::App for MeshSimApp {
             ui.label(RichText::new(format!("SNR  {:.0} dB", self.snr_db()))
                 .color(if self.snr_db() > 0.0 { Color32::GREEN } else { Color32::YELLOW }));
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.label(format!("Interval  {} ms", self.interval_ms));
             if ui.add(egui::Slider::new(&mut self.interval_ms, 200_u64..=10000).show_value(false)).changed() {
                 *self.shared.interval_ms.lock().unwrap() = self.interval_ms;
             }
 
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             let running = self.shared.running.load(Ordering::Relaxed);
             if ui.button(if running { "⏸ Pause" } else { "▶ Resume" }).clicked() {
                 self.shared.running.store(!running, Ordering::Relaxed);
@@ -289,8 +357,8 @@ impl eframe::App for MeshSimApp {
             ui.separator();
 
             // Counters.
-            let tx = *self.shared.tx_count.lock().unwrap();
-            let rx = *self.shared.rx_count.lock().unwrap();
+            let tx = self.shared.tx_count.load(Ordering::Relaxed);
+            let rx = self.shared.rx_count.load(Ordering::Relaxed);
             ui.label(format!("TX  {tx}"));
             ui.label(format!("RX  {rx}"));
             if tx > 0 {
@@ -299,7 +367,7 @@ impl eframe::App for MeshSimApp {
 
             ui.separator();
 
-            // Node info.
+            // Nodes.
             ui.heading("Nodes");
             let a_id = self.shared.a_id.lock().unwrap().clone();
             let b_id = self.shared.b_id.lock().unwrap().clone();
@@ -317,11 +385,26 @@ impl eframe::App for MeshSimApp {
             }
         });
 
-        // ── Central message log ──────────────────────────────────────────────
+        // ── Central: spectrum + waterfall + messages ─────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Mesh Message Log");
+            let avail = ui.available_height();
+
+            // Spectrum: top 25%.
+            let spec_h = (avail * 0.25).max(80.0);
+            ui.allocate_ui(egui::vec2(ui.available_width(), spec_h), |ui| {
+                self.spectrum_chart.ui(ui);
+            });
+
+            // Waterfall: next 35%.
+            let wf_h = (avail * 0.35).max(100.0);
+            ui.allocate_ui(egui::vec2(ui.available_width(), wf_h), |ui| {
+                self.waterfall_chart.ui(ui);
+            });
+
             ui.separator();
 
+            // Message log: remaining space.
+            ui.heading("Mesh Messages");
             ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .stick_to_bottom(true)
@@ -337,7 +420,7 @@ impl eframe::App for MeshSimApp {
     }
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+// ── Entry point ──────────────────────────────────────────────────────────────
 
 fn main() -> eframe::Result<()> {
     let shared = SimShared::new();
@@ -347,7 +430,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Mesh Sim")
-            .with_inner_size([800.0, 540.0]),
+            .with_inner_size([960.0, 700.0]),
         ..Default::default()
     };
     eframe::run_native(
