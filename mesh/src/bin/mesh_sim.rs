@@ -1,16 +1,16 @@
 /// Two-node Meshtastic simulation with egui GUI, spectrum & waterfall.
 ///
 /// Supports both a simulated AWGN channel and real RF via UHD (USRP).
+/// Compiles to native (tokio) and WASM (gloo-timers).
 ///
-/// Run with:
-///   cargo run --bin mesh_sim
+/// Run native:  cargo run --bin mesh_sim
+/// Build WASM:  trunk build --release
 
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    time::{Duration, Instant},
-    thread,
+    time::Duration,
 };
 
 use eframe::egui::{self, Color32, RichText, ScrollArea};
@@ -35,18 +35,24 @@ const CR: u8 = 4;
 const SYNC_WORD: u8 = 0x2B;
 const PREAMBLE: u16 = 16;
 const FFT_SIZE: usize = 2048;
-/// Sim sample rate = BW × OS = 250 kHz × 4 = 1 MHz.
 const SR_HZ: u64 = 1_000_000;
-/// Sim tick period (~60 fps).
 const TICK: Duration = Duration::from_millis(16);
-/// NodeInfo beacon interval in samples.
 const BEACON_INTERVAL: u64 = 5 * SR_HZ;
 
 const DEFAULT_SF: u8 = 11;
 const DEFAULT_SIGNAL_DB: f32 = -20.0;
 const DEFAULT_NOISE_DB: f32 = -60.0;
 const DEFAULT_INTERVAL_MS: u64 = 2000;
-const DEFAULT_PRESET_IDX: usize = 5; // LongFast
+const DEFAULT_PRESET_IDX: usize = 5;
+
+// ── Platform helpers ─────────────────────────────────────────────────────────
+
+async fn tick_sleep(remaining: Duration) {
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::time::sleep(remaining).await;
+    #[cfg(target_arch = "wasm32")]
+    gloo_timers::future::TimeoutFuture::new(remaining.as_millis() as u32).await;
+}
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -70,11 +76,9 @@ struct SimShared {
     tx_count:      AtomicU64,
     rx_count:      AtomicU64,
 
-    // Visualization.
     spectrum_plot:  Arc<SpectrumPlot>,
     waterfall_plot: Arc<WaterfallPlot>,
 
-    // Driver selection.
     use_uhd:        AtomicBool,
     uhd_args:       Mutex<String>,
     uhd_freq_hz:    Mutex<f64>,
@@ -152,9 +156,9 @@ fn make_driver(shared: &SimShared) -> Box<dyn Driver> {
     Box::new(Channel::new(noise_sigma, signal_amp))
 }
 
-// ── Simulation thread ────────────────────────────────────────────────────────
+// ── Simulation loop (async, runs on tokio native / spawn_local wasm) ─────────
 
-fn sim_thread(shared: Arc<SimShared>) {
+async fn sim_loop(shared: Arc<SimShared>) {
     let channel_cfg = ChannelConfig::default();
 
     let node_a = MeshNode::with_identity(channel_cfg.clone(), "MSIM", "Mesh-Sim Node A");
@@ -190,10 +194,11 @@ fn sim_thread(shared: Arc<SimShared>) {
     let mut active_uhd_args = String::new();
 
     loop {
-        let tick_start = Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        let tick_start = std::time::Instant::now();
 
         if !shared.running.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(50));
+            tick_sleep(Duration::from_millis(50)).await;
             continue;
         }
 
@@ -280,13 +285,11 @@ fn sim_thread(shared: Arc<SimShared>) {
         driver.set_signal_amp(signal_amp);
         driver.set_noise_sigma(noise_sigma);
 
-        // Per-tick HW gain updates (no-op for sim channel).
         let uhd_rx_gain = *shared.uhd_rx_gain_db.lock().unwrap();
         let uhd_tx_gain = *shared.uhd_tx_gain_db.lock().unwrap();
         if uhd_rx_gain != last_uhd_rx_gain { last_uhd_rx_gain = uhd_rx_gain; driver.set_hw_rx_gain(uhd_rx_gain); }
         if uhd_tx_gain != last_uhd_tx_gain { last_uhd_tx_gain = uhd_tx_gain; driver.set_hw_tx_gain(uhd_tx_gain); }
 
-        // Rebuild modems if SF changed.
         if sf != cur_sf {
             cur_sf = sf;
             tx_modem = Tx::new(sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
@@ -381,10 +384,14 @@ fn sim_thread(shared: Arc<SimShared>) {
             }
         }
 
-        let elapsed = tick_start.elapsed();
-        if let Some(remaining) = TICK.checked_sub(elapsed) {
-            thread::sleep(remaining);
+        // Sleep for the remainder of the tick.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let elapsed = tick_start.elapsed();
+            if elapsed < TICK { tick_sleep(TICK - elapsed).await; }
         }
+        #[cfg(target_arch = "wasm32")]
+        tick_sleep(TICK).await;
     }
 }
 
@@ -399,7 +406,6 @@ struct MeshSimApp {
     preset_idx:      usize,
     spectrum_chart:  Chart,
     waterfall_chart: Chart,
-    // Driver settings (local copies for immediate UI feedback).
     use_uhd:         bool,
     uhd_args:        String,
     uhd_freq_mhz:    f64,
@@ -476,7 +482,6 @@ impl eframe::App for MeshSimApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(32));
 
-        // ── UHD loading modal ────────────────────────────────────────────
         #[cfg(feature = "uhd")]
         if self.shared.uhd_loading.load(Ordering::Relaxed) {
             egui::Modal::new(egui::Id::new("uhd_loading")).show(ctx, |ui| {
@@ -496,7 +501,6 @@ impl eframe::App for MeshSimApp {
             ui.heading("Settings");
             ui.separator();
 
-            // Preset.
             ui.label("Preset");
             egui::ComboBox::from_id_salt("preset")
                 .selected_text(PRESETS[self.preset_idx].name)
@@ -585,8 +589,6 @@ impl eframe::App for MeshSimApp {
 
             if self.use_uhd {
                 ui.add_space(4.0);
-
-                // Args.
                 ui.label("Args");
                 let args_resp = ui.add(
                     egui::TextEdit::singleline(&mut self.uhd_args)
@@ -598,7 +600,6 @@ impl eframe::App for MeshSimApp {
                     self.trigger_rebuild();
                 }
 
-                // Freq.
                 ui.horizontal(|ui| {
                     ui.label("Freq");
                     if ui.add(
@@ -615,7 +616,6 @@ impl eframe::App for MeshSimApp {
 
             ui.separator();
 
-            // Counters.
             let tx = self.shared.tx_count.load(Ordering::Relaxed);
             let rx = self.shared.rx_count.load(Ordering::Relaxed);
             ui.label(format!("TX  {tx}"));
@@ -629,7 +629,6 @@ impl eframe::App for MeshSimApp {
 
             ui.separator();
 
-            // Nodes.
             ui.heading("Nodes");
             let a_id = self.shared.a_id.lock().unwrap().clone();
             let b_id = self.shared.b_id.lock().unwrap().clone();
@@ -651,13 +650,11 @@ impl eframe::App for MeshSimApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let avail = ui.available_height();
 
-            // Spectrum: top 25%.
             let spec_h = (avail * 0.25).max(80.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), spec_h), |ui| {
                 self.spectrum_chart.ui(ui);
             });
 
-            // Waterfall: next 35%.
             let wf_h = (avail * 0.35).max(100.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), wf_h), |ui| {
                 self.waterfall_chart.ui(ui);
@@ -665,7 +662,6 @@ impl eframe::App for MeshSimApp {
 
             ui.separator();
 
-            // Message log: remaining space.
             ui.heading("Mesh Messages");
             ScrollArea::vertical()
                 .auto_shrink([false; 2])
@@ -682,12 +678,52 @@ impl eframe::App for MeshSimApp {
     }
 }
 
-// ── Entry point ──────────────────────────────────────────────────────────────
+// ── WASM entry point ─────────────────────────────────────────────────────────
 
+#[cfg(feature = "wasm")]
+mod wasm_entry {
+    use super::*;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
+    use web_sys::HtmlCanvasElement;
+
+    #[wasm_bindgen(start)]
+    pub async fn start() {
+        console_error_panic_hook::set_once();
+
+        let shared = SimShared::new();
+        let shared_sim = Arc::clone(&shared);
+        wasm_bindgen_futures::spawn_local(sim_loop(shared_sim));
+
+        let canvas = web_sys::window().unwrap()
+            .document().unwrap()
+            .get_element_by_id("canvas").unwrap()
+            .unchecked_into::<HtmlCanvasElement>();
+
+        let _ = eframe::WebRunner::new()
+            .start(
+                canvas,
+                eframe::WebOptions::default(),
+                Box::new(move |_cc| Ok(Box::new(MeshSimApp::new(shared)))),
+            )
+            .await;
+    }
+}
+
+// ── Native entry point ───────────────────────────────────────────────────────
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let shared = SimShared::new();
     let shared_sim = Arc::clone(&shared);
-    thread::spawn(move || sim_thread(shared_sim));
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(sim_loop(shared_sim));
+    });
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

@@ -10,8 +10,14 @@ default = ["native", "uhd"]
 native  = ["tokio/rt", "tokio/rt-multi-thread", "tokio/time", "tokio/sync"]
 # UHD (USRP Hardware Driver) support — forwards to lora crate.
 uhd     = ["lora/uhd"]
-# WebAssembly build — disables tokio, uses gloo-timers instead.
-wasm    = ["dep:gloo-timers"]
+# WebAssembly build — uses gloo-timers and wasm-bindgen entry point.
+wasm    = [
+    "dep:gloo-timers",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+    "dep:console_error_panic_hook",
+]
 
 [dependencies]
 # PHY layer (submodule — no C deps by default; UHD gated on feature)
@@ -39,6 +45,18 @@ tokio = { version = "1", default-features = false, optional = true }
 
 # WASM async timers
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
+
+# WASM entry point
+wasm-bindgen             = { version = "0.2",  optional = true }
+wasm-bindgen-futures     = { version = "0.4",  optional = true }
+web-sys                  = { version = "0.3",  optional = true, features = ["Window", "Document", "HtmlCanvasElement"] }
+console_error_panic_hook = { version = "0.1",  optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
 
 [build-dependencies]
 # Uncomment when adding .proto compilation in a future phase:
