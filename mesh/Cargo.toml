@@ -5,14 +5,16 @@ edition = "2024"
 license = "GPL-3.0-only"
 
 [features]
-default = ["native"]
+default = ["native", "uhd"]
 # Native (non-wasm) build — enables tokio's full async runtime.
 native  = ["tokio/rt", "tokio/rt-multi-thread", "tokio/time", "tokio/sync"]
+# UHD (USRP Hardware Driver) support — forwards to lora crate.
+uhd     = ["lora/uhd"]
 # WebAssembly build — disables tokio, uses gloo-timers instead.
 wasm    = ["dep:gloo-timers"]
 
 [dependencies]
-# PHY layer (submodule — no C deps, no UHD, no GUI)
+# PHY layer (submodule — no C deps by default; UHD gated on feature)
 lora = { path = "../lora-rs", default-features = false }
 
 # GUI (used by the mesh_sim binary)

@@ -1,8 +1,6 @@
 /// Two-node Meshtastic simulation with egui GUI, spectrum & waterfall.
 ///
-/// Node A and Node B share an in-memory AWGN channel.  The sim runs a
-/// continuous tick-based loop so the spectrum/waterfall show the noise floor
-/// between packets and the LoRa chirps during transmission.
+/// Supports both a simulated AWGN channel and real RF via UHD (USRP).
 ///
 /// Run with:
 ///   cargo run --bin mesh_sim
@@ -17,9 +15,11 @@ use std::{
 
 use eframe::egui::{self, Color32, RichText, ScrollArea};
 use rustfft::num_complex::Complex;
-use lora::channel::Channel;
+use lora::channel::{Channel, Driver};
 use lora::modem::{Tx, Rx};
 use lora::ui::{Chart, SpectrumPlot, WaterfallPlot, SpectrumAnalyzer};
+#[cfg(feature = "uhd")]
+use lora::uhd::UhdDevice;
 
 use mesh::{
     app::{ChannelConfig, MeshNode},
@@ -42,6 +42,12 @@ const TICK: Duration = Duration::from_millis(16);
 /// NodeInfo beacon interval in samples.
 const BEACON_INTERVAL: u64 = 5 * SR_HZ;
 
+const DEFAULT_SF: u8 = 11;
+const DEFAULT_SIGNAL_DB: f32 = -20.0;
+const DEFAULT_NOISE_DB: f32 = -60.0;
+const DEFAULT_INTERVAL_MS: u64 = 2000;
+const DEFAULT_PRESET_IDX: usize = 5; // LongFast
+
 // ── Shared state ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -51,22 +57,31 @@ struct LogEntry {
 }
 
 struct SimShared {
-    running:     AtomicBool,
-    sf:          Mutex<u8>,
-    signal_db:   Mutex<f32>,
-    noise_db:    Mutex<f32>,
-    interval_ms: Mutex<u64>,
-    log:         Mutex<VecDeque<LogEntry>>,
-    a_neighbours: Mutex<Vec<String>>,
-    b_neighbours: Mutex<Vec<String>>,
-    a_id:        Mutex<String>,
-    b_id:        Mutex<String>,
-    tx_count:    AtomicU64,
-    rx_count:    AtomicU64,
+    running:       AtomicBool,
+    sf:            Mutex<u8>,
+    signal_db:     Mutex<f32>,
+    noise_db:      Mutex<f32>,
+    interval_ms:   Mutex<u64>,
+    log:           Mutex<VecDeque<LogEntry>>,
+    a_neighbours:  Mutex<Vec<String>>,
+    b_neighbours:  Mutex<Vec<String>>,
+    a_id:          Mutex<String>,
+    b_id:          Mutex<String>,
+    tx_count:      AtomicU64,
+    rx_count:      AtomicU64,
 
     // Visualization.
     spectrum_plot:  Arc<SpectrumPlot>,
     waterfall_plot: Arc<WaterfallPlot>,
+
+    // Driver selection.
+    use_uhd:        AtomicBool,
+    uhd_args:       Mutex<String>,
+    uhd_freq_hz:    Mutex<f64>,
+    uhd_rx_gain_db: Mutex<f64>,
+    uhd_tx_gain_db: Mutex<f64>,
+    rebuild_driver: AtomicBool,
+    uhd_loading:    AtomicBool,
 }
 
 impl SimShared {
@@ -79,10 +94,10 @@ impl SimShared {
 
         Arc::new(Self {
             running:      AtomicBool::new(true),
-            sf:           Mutex::new(11),
-            signal_db:    Mutex::new(-20.0),
-            noise_db:     Mutex::new(-60.0),
-            interval_ms:  Mutex::new(2000),
+            sf:           Mutex::new(DEFAULT_SF),
+            signal_db:    Mutex::new(DEFAULT_SIGNAL_DB),
+            noise_db:     Mutex::new(DEFAULT_NOISE_DB),
+            interval_ms:  Mutex::new(DEFAULT_INTERVAL_MS),
             log:          Mutex::new(VecDeque::new()),
             a_neighbours: Mutex::new(vec![]),
             b_neighbours: Mutex::new(vec![]),
@@ -92,6 +107,13 @@ impl SimShared {
             rx_count:     AtomicU64::new(0),
             spectrum_plot,
             waterfall_plot,
+            use_uhd:        AtomicBool::new(false),
+            uhd_args:       Mutex::new(String::new()),
+            uhd_freq_hz:    Mutex::new(915e6),
+            uhd_rx_gain_db: Mutex::new(40.0),
+            uhd_tx_gain_db: Mutex::new(40.0),
+            rebuild_driver: AtomicBool::new(false),
+            uhd_loading:    AtomicBool::new(false),
         })
     }
 }
@@ -102,6 +124,32 @@ fn push_log(shared: &SimShared, ok: bool, text: String) {
     let mut log = shared.log.lock().unwrap();
     log.push_back(LogEntry { ok, text });
     if log.len() > MAX_LOG { log.pop_front(); }
+}
+
+// ── Driver factory ───────────────────────────────────────────────────────────
+
+fn make_driver(shared: &SimShared) -> Box<dyn Driver> {
+    let noise_sigma = db_to_amp(*shared.noise_db.lock().unwrap()) / std::f32::consts::SQRT_2;
+    let signal_amp  = db_to_amp(*shared.signal_db.lock().unwrap());
+
+    #[cfg(feature = "uhd")]
+    if shared.use_uhd.load(Ordering::Relaxed) {
+        let args    = shared.uhd_args.lock().unwrap().clone();
+        let freq    = *shared.uhd_freq_hz.lock().unwrap();
+        let rx_gain = *shared.uhd_rx_gain_db.lock().unwrap();
+        let tx_gain = *shared.uhd_tx_gain_db.lock().unwrap();
+        let sr_hz   = SR_HZ as f64;
+        let bw_hz   = sr_hz / OS_FACTOR as f64;
+        match UhdDevice::new(&args, freq, sr_hz, bw_hz, rx_gain, tx_gain) {
+            Ok(dev) => return Box::new(dev),
+            Err(e)  => {
+                eprintln!("[uhd] open failed: {e} — falling back to sim");
+                shared.use_uhd.store(false, Ordering::Relaxed);
+            }
+        }
+    }
+
+    Box::new(Channel::new(noise_sigma, signal_amp))
 }
 
 // ── Simulation thread ────────────────────────────────────────────────────────
@@ -115,27 +163,31 @@ fn sim_thread(shared: Arc<SimShared>) {
     *shared.a_id.lock().unwrap() = format!("!{:08x}", node_a.node_id());
     *shared.b_id.lock().unwrap() = format!("!{:08x}", node_b.node_id());
 
-    let mut channel = Channel::new(0.001, 0.1);
+    let mut driver: Box<dyn Driver> = make_driver(&shared);
     let mut analyzer = SpectrumAnalyzer::new(FFT_SIZE);
 
-    let mut tx_modem = Tx::new(11, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-    let mut rx_modem = Rx::new(11, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-    let mut cur_sf: u8 = 11;
+    let mut tx_modem = Tx::new(DEFAULT_SF, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let mut rx_modem = Rx::new(DEFAULT_SF, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let mut cur_sf: u8 = DEFAULT_SF;
 
     let mut rx_buffer: Vec<Complex<f32>> = Vec::new();
 
     let mut produced: u64 = 0;
     let mut seq: u32 = 0;
-    let mut next_tx_at: u64 = SR_HZ; // first packet after 1 s warm-up
-    let mut next_beacon_at: u64 = SR_HZ / 2; // first beacon after 0.5 s
-    let mut prev_interval_ms: u64 = 2000;
+    let mut next_tx_at: u64 = SR_HZ;
+    let mut next_beacon_at: u64 = SR_HZ / 2;
+    let mut prev_interval_ms: u64 = DEFAULT_INTERVAL_MS;
 
     let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
 
-    // Maximum rx_buffer before we force-drain.  Must hold at least one full
-    // maximum-size packet.  At SF=12/OS=4 the worst-case frame (253 B payload)
-    // is ~3 M samples; 4 M gives comfortable margin.
     const MAX_RX_BUF: usize = 4_000_000;
+
+    let mut last_uhd_rx_gain = f64::NAN;
+    let mut last_uhd_tx_gain = f64::NAN;
+    #[cfg(feature = "uhd")]
+    let mut parked_uhd: Option<(Box<dyn Driver>, String)> = None;
+    #[cfg(feature = "uhd")]
+    let mut active_uhd_args = String::new();
 
     loop {
         let tick_start = Instant::now();
@@ -145,14 +197,78 @@ fn sim_thread(shared: Arc<SimShared>) {
             continue;
         }
 
-        // ── Read params (single lock per field, fast) ────────────────────
+        // ── Driver rebuild ───────────────────────────────────────────────
+        let should_rebuild = shared.rebuild_driver.swap(false, Ordering::Relaxed);
+        if should_rebuild {
+            #[cfg(feature = "uhd")]
+            {
+                let use_uhd  = shared.use_uhd.load(Ordering::Relaxed);
+                let cur_args = shared.uhd_args.lock().unwrap().clone();
+                if use_uhd {
+                    let freq  = *shared.uhd_freq_hz.lock().unwrap();
+                    let rxg   = *shared.uhd_rx_gain_db.lock().unwrap();
+                    let txg   = *shared.uhd_tx_gain_db.lock().unwrap();
+                    let sr_hz = SR_HZ as f64;
+                    let bw_hz = sr_hz / OS_FACTOR as f64;
+
+                    if driver.is_parkable() && active_uhd_args == cur_args {
+                        driver.park();
+                        driver.unpark(freq, sr_hz, bw_hz, rxg, txg);
+                    } else {
+                        let reuse = parked_uhd.as_ref()
+                            .map(|(_, args)| args == &cur_args)
+                            .unwrap_or(false);
+                        if reuse {
+                            let (mut dev, _) = parked_uhd.take().unwrap();
+                            dev.unpark(freq, sr_hz, bw_hz, rxg, txg);
+                            driver = dev;
+                        } else {
+                            parked_uhd = None;
+                            driver = Box::new(Channel::new(0.0, 1.0));
+                            shared.uhd_loading.store(true, Ordering::Relaxed);
+                            let result = UhdDevice::new(&cur_args, freq, sr_hz, bw_hz, rxg, txg);
+                            shared.uhd_loading.store(false, Ordering::Relaxed);
+                            match result {
+                                Ok(dev) => driver = Box::new(dev),
+                                Err(e) => {
+                                    eprintln!("[uhd] open failed: {e} — falling back to sim");
+                                    shared.use_uhd.store(false, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        active_uhd_args = cur_args;
+                    }
+                    last_uhd_rx_gain = f64::NAN;
+                    last_uhd_tx_gain = f64::NAN;
+                } else {
+                    if driver.is_parkable() {
+                        let noise = db_to_amp(*shared.noise_db.lock().unwrap()) / std::f32::consts::SQRT_2;
+                        let sig   = db_to_amp(*shared.signal_db.lock().unwrap());
+                        let mut old = std::mem::replace(&mut driver, Box::new(Channel::new(noise, sig)));
+                        old.park();
+                        parked_uhd = Some((old, cur_args));
+                    } else {
+                        driver = make_driver(&shared);
+                    }
+                }
+            }
+            #[cfg(not(feature = "uhd"))]
+            {
+                driver = make_driver(&shared);
+            }
+            rx_buffer.clear();
+            produced        = 0;
+            next_tx_at      = SR_HZ;
+            next_beacon_at  = SR_HZ / 2;
+        }
+
+        // ── Read params ──────────────────────────────────────────────────
         let sf         = *shared.sf.lock().unwrap();
         let signal_amp = db_to_amp(*shared.signal_db.lock().unwrap());
         let noise_sigma = db_to_amp(*shared.noise_db.lock().unwrap()) / std::f32::consts::SQRT_2;
         let interval_ms = *shared.interval_ms.lock().unwrap();
         let interval_samples = interval_ms * SR_HZ / 1000;
 
-        // If interval was shortened, clamp next_tx_at so it fires sooner.
         if interval_ms != prev_interval_ms {
             prev_interval_ms = interval_ms;
             let earliest = produced + interval_samples;
@@ -161,8 +277,14 @@ fn sim_thread(shared: Arc<SimShared>) {
             }
         }
 
-        channel.set_signal_amp(signal_amp);
-        channel.set_noise_sigma(noise_sigma);
+        driver.set_signal_amp(signal_amp);
+        driver.set_noise_sigma(noise_sigma);
+
+        // Per-tick HW gain updates (no-op for sim channel).
+        let uhd_rx_gain = *shared.uhd_rx_gain_db.lock().unwrap();
+        let uhd_tx_gain = *shared.uhd_tx_gain_db.lock().unwrap();
+        if uhd_rx_gain != last_uhd_rx_gain { last_uhd_rx_gain = uhd_rx_gain; driver.set_hw_rx_gain(uhd_rx_gain); }
+        if uhd_tx_gain != last_uhd_tx_gain { last_uhd_tx_gain = uhd_tx_gain; driver.set_hw_tx_gain(uhd_tx_gain); }
 
         // Rebuild modems if SF changed.
         if sf != cur_sf {
@@ -170,7 +292,7 @@ fn sim_thread(shared: Arc<SimShared>) {
             tx_modem = Tx::new(sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
             rx_modem = Rx::new(sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
             rx_buffer.clear();
-            channel.clear();
+            driver.clear();
         }
 
         // ── NodeInfo beacon ──────────────────────────────────────────────
@@ -179,11 +301,11 @@ fn sim_thread(shared: Arc<SimShared>) {
 
             if let Some(frame) = node_a.build_nodeinfo_frame() {
                 let iq = tx_modem.modulate(&frame.to_bytes());
-                channel.push_samples(iq);
+                driver.push_samples(iq);
             }
             if let Some(frame) = node_b.build_nodeinfo_frame() {
                 let iq = tx_modem.modulate(&frame.to_bytes());
-                channel.push_samples(iq);
+                driver.push_samples(iq);
             }
 
             *shared.a_neighbours.lock().unwrap() = node_a.neighbours()
@@ -202,13 +324,13 @@ fn sim_thread(shared: Arc<SimShared>) {
                 shared.tx_count.fetch_add(1, Ordering::Relaxed);
                 push_log(&shared, true, format!("TX A→* \"{text}\""));
                 let iq = tx_modem.modulate(&frame.to_bytes());
-                channel.push_samples(iq);
+                driver.push_samples(iq);
             }
         }
 
-        // ── Tick channel → mixed IQ ──────────────────────────────────────
-        let mixed = channel.tick(samples_per_tick);
-        produced += samples_per_tick as u64;
+        // ── Tick driver → mixed IQ ───────────────────────────────────────
+        let mixed = driver.tick(samples_per_tick);
+        produced += mixed.len() as u64;
 
         // ── FFT → spectrum & waterfall ───────────────────────────────────
         let mut peak: Vec<[f64; 2]> = Vec::new();
@@ -232,13 +354,11 @@ fn sim_thread(shared: Arc<SimShared>) {
         // ── Streaming RX decode ──────────────────────────────────────────
         rx_buffer.extend_from_slice(&mixed);
 
-        // Safety-valve: prevent truly unbounded growth.
         if rx_buffer.len() > MAX_RX_BUF {
             let drain = rx_buffer.len() - MAX_RX_BUF / 2;
             rx_buffer.drain(..drain);
         }
 
-        // Try to decode frames from the buffer.
         loop {
             match rx_modem.decode_streaming(&rx_buffer) {
                 Some((payload, consumed)) => {
@@ -261,7 +381,6 @@ fn sim_thread(shared: Arc<SimShared>) {
             }
         }
 
-        // Sleep only the remainder of the tick to maintain real-time pacing.
         let elapsed = tick_start.elapsed();
         if let Some(remaining) = TICK.checked_sub(elapsed) {
             thread::sleep(remaining);
@@ -280,6 +399,12 @@ struct MeshSimApp {
     preset_idx:      usize,
     spectrum_chart:  Chart,
     waterfall_chart: Chart,
+    // Driver settings (local copies for immediate UI feedback).
+    use_uhd:         bool,
+    uhd_args:        String,
+    uhd_freq_mhz:    f64,
+    uhd_rx_gain_db:  f64,
+    uhd_tx_gain_db:  f64,
 }
 
 impl MeshSimApp {
@@ -302,13 +427,18 @@ impl MeshSimApp {
 
         Self {
             shared,
-            sf: 11,
-            signal_db: -20.0,
-            noise_db: -60.0,
-            interval_ms: 2000,
-            preset_idx: 5, // LongFast
+            sf: DEFAULT_SF,
+            signal_db: DEFAULT_SIGNAL_DB,
+            noise_db: DEFAULT_NOISE_DB,
+            interval_ms: DEFAULT_INTERVAL_MS,
+            preset_idx: DEFAULT_PRESET_IDX,
             spectrum_chart,
             waterfall_chart,
+            use_uhd:        false,
+            uhd_args:        String::new(),
+            uhd_freq_mhz:   915.0,
+            uhd_rx_gain_db:  40.0,
+            uhd_tx_gain_db:  40.0,
         }
     }
 
@@ -318,11 +448,11 @@ impl MeshSimApp {
     }
 
     fn restore_defaults(&mut self) {
-        self.preset_idx  = 5; // LongFast
-        self.sf          = 11;
-        self.signal_db   = -20.0;
-        self.noise_db    = -60.0;
-        self.interval_ms = 2000;
+        self.preset_idx  = DEFAULT_PRESET_IDX;
+        self.sf          = DEFAULT_SF;
+        self.signal_db   = DEFAULT_SIGNAL_DB;
+        self.noise_db    = DEFAULT_NOISE_DB;
+        self.interval_ms = DEFAULT_INTERVAL_MS;
         *self.shared.sf.lock().unwrap()          = self.sf;
         *self.shared.signal_db.lock().unwrap()   = self.signal_db;
         *self.shared.noise_db.lock().unwrap()    = self.noise_db;
@@ -335,6 +465,10 @@ impl MeshSimApp {
         self.shared.log.lock().unwrap().clear();
     }
 
+    fn trigger_rebuild(&self) {
+        self.shared.rebuild_driver.store(true, Ordering::Relaxed);
+    }
+
     fn snr_db(&self) -> f32 { self.signal_db - self.noise_db }
 }
 
@@ -342,8 +476,23 @@ impl eframe::App for MeshSimApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(32));
 
+        // ── UHD loading modal ────────────────────────────────────────────
+        #[cfg(feature = "uhd")]
+        if self.shared.uhd_loading.load(Ordering::Relaxed) {
+            egui::Modal::new(egui::Id::new("uhd_loading")).show(ctx, |ui| {
+                ui.set_min_width(220.0);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(8.0);
+                    ui.add(egui::Spinner::new().size(32.0));
+                    ui.add_space(6.0);
+                    ui.heading("Opening USRP…");
+                    ui.add_space(8.0);
+                });
+            });
+        }
+
         // ── Left settings panel ──────────────────────────────────────────
-        egui::SidePanel::left("settings").min_width(190.0).show(ctx, |ui| {
+        egui::SidePanel::left("settings").min_width(200.0).show(ctx, |ui| {
             ui.heading("Settings");
             ui.separator();
 
@@ -367,18 +516,21 @@ impl eframe::App for MeshSimApp {
             }
 
             ui.add_space(4.0);
+            let sim_mode = !self.use_uhd;
             ui.label(format!("Signal  {:.0} dB", self.signal_db));
-            if ui.add(egui::Slider::new(&mut self.signal_db, -60.0_f32..=0.0).show_value(false)).changed() {
+            if ui.add_enabled(sim_mode, egui::Slider::new(&mut self.signal_db, -60.0_f32..=0.0).show_value(false)).changed() {
                 *self.shared.signal_db.lock().unwrap() = self.signal_db;
             }
 
             ui.label(format!("Noise   {:.0} dB", self.noise_db));
-            if ui.add(egui::Slider::new(&mut self.noise_db, -80.0_f32..=-20.0).show_value(false)).changed() {
+            if ui.add_enabled(sim_mode, egui::Slider::new(&mut self.noise_db, -80.0_f32..=-20.0).show_value(false)).changed() {
                 *self.shared.noise_db.lock().unwrap() = self.noise_db;
             }
 
-            ui.label(RichText::new(format!("SNR  {:.0} dB", self.snr_db()))
-                .color(if self.snr_db() > 0.0 { Color32::GREEN } else { Color32::YELLOW }));
+            if sim_mode {
+                ui.label(RichText::new(format!("SNR  {:.0} dB", self.snr_db()))
+                    .color(if self.snr_db() > 0.0 { Color32::GREEN } else { Color32::YELLOW }));
+            }
 
             ui.add_space(4.0);
             ui.label(format!("Interval  {} ms", self.interval_ms));
@@ -396,6 +548,70 @@ impl eframe::App for MeshSimApp {
                     self.restore_defaults();
                 }
             });
+
+            ui.separator();
+
+            // ── Driver selection ─────────────────────────────────────────
+            ui.heading("Driver");
+            ui.horizontal(|ui| {
+                if ui.selectable_label(!self.use_uhd, "Sim").clicked() && self.use_uhd {
+                    self.use_uhd = false;
+                    self.shared.use_uhd.store(false, Ordering::Relaxed);
+                    self.trigger_rebuild();
+                }
+                #[cfg(feature = "uhd")]
+                if ui.selectable_label(self.use_uhd, "UHD").clicked() && !self.use_uhd {
+                    self.use_uhd = true;
+                    self.shared.use_uhd.store(true, Ordering::Relaxed);
+                    self.trigger_rebuild();
+                }
+                #[cfg(not(feature = "uhd"))]
+                {
+                    ui.add_enabled(false, egui::SelectableLabel::new(false, "UHD (disabled)"));
+                }
+            });
+
+            if self.use_uhd {
+                ui.add_space(4.0);
+
+                // Args.
+                ui.label("Args");
+                let args_resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.uhd_args)
+                        .hint_text("addr=… or empty")
+                        .desired_width(f32::INFINITY),
+                );
+                if args_resp.lost_focus() {
+                    *self.shared.uhd_args.lock().unwrap() = self.uhd_args.clone();
+                    self.trigger_rebuild();
+                }
+
+                // Freq.
+                ui.horizontal(|ui| {
+                    ui.label("Freq");
+                    if ui.add(
+                        egui::DragValue::new(&mut self.uhd_freq_mhz)
+                            .range(1.0..=6000.0)
+                            .speed(0.1)
+                            .suffix(" MHz"),
+                    ).changed() {
+                        *self.shared.uhd_freq_hz.lock().unwrap() = self.uhd_freq_mhz * 1e6;
+                        self.trigger_rebuild();
+                    }
+                });
+
+                // TX gain.
+                ui.label(format!("TX Gain  {:.0} dB", self.uhd_tx_gain_db));
+                if ui.add(egui::Slider::new(&mut self.uhd_tx_gain_db, 0.0_f64..=89.0).show_value(false)).changed() {
+                    *self.shared.uhd_tx_gain_db.lock().unwrap() = self.uhd_tx_gain_db;
+                }
+
+                // RX gain.
+                ui.label(format!("RX Gain  {:.0} dB", self.uhd_rx_gain_db));
+                if ui.add(egui::Slider::new(&mut self.uhd_rx_gain_db, 0.0_f64..=76.0).show_value(false)).changed() {
+                    *self.shared.uhd_rx_gain_db.lock().unwrap() = self.uhd_rx_gain_db;
+                }
+            }
 
             ui.separator();
 
