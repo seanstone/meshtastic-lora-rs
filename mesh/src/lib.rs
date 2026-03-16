@@ -19,3 +19,4 @@ pub mod presets;
 pub mod app;
 pub mod serial;
 pub mod mqtt;
+pub mod ws;

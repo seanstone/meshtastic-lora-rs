@@ -29,6 +29,7 @@ routing, duty-cycle enforcement, protobuf types, and the application interface
 │  └──────────────────────────┬──────────────────────────────┘   │
 │  serial — Meshtastic serial framing protocol                   │
 │  mqtt   — MQTT bridge (rumqttc, ServiceEnvelope)               │
+│  ws     — WebSocket server (JSON commands/events)              │
 │                              │ lora::modem  lora::channel       │
 └──────────────────────────────┼──────────────────────────────────┘
                                │
@@ -76,6 +77,7 @@ meshtastic-lora-rs/
 │       ├── app.rs           — MeshNode public API
 │       ├── serial.rs        — serial framing (magic + length-prefix)
 │       ├── mqtt.rs          — MQTT bridge (rumqttc, ServiceEnvelope)
+│       ├── ws.rs            — WebSocket server (tokio-tungstenite, JSON)
 │       └── bin/
 │           ├── mesh_sim.rs  — two-node egui simulation (spectrum + waterfall)
 │           └── mesh_node.rs — headless node (text / serial / MQTT)
@@ -121,12 +123,15 @@ cargo run --bin mesh_node -- --mqtt --mqtt-host broker.local
 # Real RF via USRP
 cargo run --bin mesh_node -- --uhd --freq 906.875
 
-# Combine: MQTT + UHD (three-way bridge: stdin ↔ RF ↔ MQTT)
-cargo run --bin mesh_node -- --mqtt --uhd --freq 906.875
+# WebSocket server — external tools connect via ws://localhost:9001
+cargo run --bin mesh_node -- --ws
+
+# Combine modes: MQTT + UHD + WebSocket (four-way bridge)
+cargo run --bin mesh_node -- --mqtt --uhd --freq 906.875 --ws
 ```
 
-**Text mode** reads lines from stdin, transmits as `TEXT_MESSAGE_APP`
-broadcasts, and prints received messages to stdout.
+**Text mode** (default) reads lines from stdin, transmits as
+`TEXT_MESSAGE_APP` broadcasts, and prints received messages to stdout.
 
 **Serial mode** (`--serial`) speaks the Meshtastic serial framing protocol
 (`[0x94 0xC3] [len_u16_be] [protobuf]`) using `FromRadio` / `ToRadio`
@@ -136,6 +141,21 @@ messages.  Responds to config handshakes (`want_config_id` →
 **MQTT mode** (`--mqtt`) connects to a Meshtastic MQTT broker, subscribes to
 `msh/2/c/LongFast/+`, and bridges packets between the local RF channel and
 the internet as `ServiceEnvelope` protobufs.
+
+**WebSocket** (`--ws`) starts a WebSocket server on port 9001 (or
+`--ws-port N`).  External tools send JSON commands and receive JSON events:
+
+```jsonc
+// → send to node
+{ "type": "send_text", "to": 4294967295, "text": "hello" }
+
+// ← received from node
+{ "type": "rx", "from": 2864434397, "to": 4294967295,
+  "portnum": 1, "text": "hello", "payload_len": 5, "hops": 2 }
+```
+
+`--ws` is combinable with any mode (text, serial, mqtt) — the WebSocket
+server runs alongside as an additional I/O channel.
 
 ### PHY simulator
 
@@ -175,7 +195,6 @@ share the same PHY tick loop and `MeshNode` instance.
 
 | Interface | What it enables |
 |-----------|-----------------|
-| WebSocket API for the WASM GUI | Browser-based sim with external message injection |
 | BLE GATT service (`6ba1b218-…`) | Direct Android / iOS Meshtastic app connection |
 
 ---
@@ -208,6 +227,8 @@ share the same PHY tick loop and `MeshNode` instance.
 | `egui`   | Immediate-mode GUI             |
 | `eframe` | Native / wasm app framework    |
 | `rumqttc`| Async MQTT client (mqtt feat)  |
+| `tokio-tungstenite` | WebSocket server (ws feat) |
+| `serde`  | JSON serialization (ws feat)   |
 | `rustfft`| FFT for spectrum analyzer      |
 | `lora`   | PHY TX / RX pipeline (submod)  |
 

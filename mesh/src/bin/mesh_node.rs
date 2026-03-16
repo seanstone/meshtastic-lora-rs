@@ -53,6 +53,8 @@ use mesh::{
 };
 #[cfg(feature = "mqtt")]
 use mesh::mqtt::{MqttConfig, spawn_mqtt_bridge, mqtt_packet_to_raw};
+#[cfg(feature = "ws")]
+use mesh::ws::{WsCommand, WsEvent, WsServer, spawn_ws_server};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -91,6 +93,8 @@ struct Config {
     mqtt_user:   String,
     mqtt_pass:   String,
     mqtt_topic:  String,
+    // WebSocket
+    ws_port:     Option<u16>,
 }
 
 impl Default for Config {
@@ -112,6 +116,7 @@ impl Default for Config {
             mqtt_user:   "meshdev".into(),
             mqtt_pass:   "large4cats".into(),
             mqtt_topic:  "msh/2/c".into(),
+            ws_port:     None,
         }
     }
 }
@@ -145,6 +150,8 @@ fn parse_args() -> Config {
             "--mqtt-user"  => { i += 1; cfg.mqtt_user    = args[i].clone(); }
             "--mqtt-pass"  => { i += 1; cfg.mqtt_pass    = args[i].clone(); }
             "--mqtt-topic" => { i += 1; cfg.mqtt_topic   = args[i].clone(); }
+            "--ws"         => { cfg.ws_port = Some(9001); }
+            "--ws-port"    => { i += 1; cfg.ws_port = Some(args[i].parse().unwrap_or(9001)); }
             other          => { eprintln!("unknown arg: {other}"); }
         }
         i += 1;
@@ -362,9 +369,34 @@ fn tick_phy(
     results
 }
 
+// ── WS event helper ──────────────────────────────────────────────────────────
+
+#[cfg(feature = "ws")]
+fn msg_to_ws_event(m: &MeshMessage) -> WsEvent {
+    WsEvent::Rx {
+        from:        m.from,
+        to:          m.to,
+        portnum:     m.data.portnum,
+        text:        m.data.text().map(|s| s.to_owned()),
+        payload_len: m.data.payload.len(),
+        hops:        m.hop_limit,
+    }
+}
+
 // ── Text mode ────────────────────────────────────────────────────────────────
 
 fn run_text_mode(cfg: Config) {
+    // If --ws is given we need a tokio runtime for the WS server.
+    #[cfg(feature = "ws")]
+    if cfg.ws_port.is_some() {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(run_text_mode_async(cfg));
+        return;
+    }
+    run_text_mode_sync(cfg);
+}
+
+fn run_text_mode_sync(cfg: Config) {
     let channel_cfg = ChannelConfig::default();
     let mut node = MeshNode::with_identity(channel_cfg, &cfg.short_name, &cfg.long_name);
 
@@ -380,7 +412,6 @@ fn run_text_mode(cfg: Config) {
 
     let mut phy = PhyState::new();
 
-    // Non-blocking stdin reader.
     let running = Arc::new(AtomicBool::new(true));
     let running2 = running.clone();
     let (tx_lines, rx_lines) = std::sync::mpsc::channel::<String>();
@@ -399,18 +430,14 @@ fn run_text_mode(cfg: Config) {
     while running.load(Ordering::Relaxed) {
         let tick_start = Instant::now();
 
-        // TX from stdin
         while let Ok(line) = rx_lines.try_recv() {
             if let Some(frame) = node.build_text_frame(BROADCAST, &line) {
                 driver.push_samples(tx_modem.modulate(&frame.to_bytes()));
                 println!("[TX] \"{}\"", line);
                 io::stdout().flush().ok();
-            } else {
-                eprintln!("[err] message too long");
             }
         }
 
-        // PHY tick
         for (msg, fwd) in tick_phy(&mut phy, &mut node, &mut driver, &tx_modem, &rx_modem, samples_per_tick) {
             if let Some(ref m) = msg {
                 if let Some(t) = m.data.text() {
@@ -422,7 +449,6 @@ fn run_text_mode(cfg: Config) {
             }
             if let Some(fwd_frame) = fwd {
                 driver.push_samples(tx_modem.modulate(&fwd_frame.to_bytes()));
-                eprintln!("[fwd] relayed packet");
             }
         }
 
@@ -432,6 +458,92 @@ fn run_text_mode(cfg: Config) {
         }
     }
     eprintln!("stdin closed, exiting");
+}
+
+#[cfg(feature = "ws")]
+async fn run_text_mode_async(cfg: Config) {
+    let channel_cfg = ChannelConfig::default();
+    let mut node = MeshNode::with_identity(channel_cfg, &cfg.short_name, &cfg.long_name);
+
+    eprintln!("node !{:08x}  name={}/{}  sf={}  driver={}",
+        node.node_id(), cfg.short_name, cfg.long_name, cfg.sf,
+        if cfg.use_uhd { "uhd" } else { "sim" });
+
+    let mut ws = spawn_ws_server(cfg.ws_port.unwrap()).await.expect("ws server");
+
+    let mut driver = make_driver(&cfg);
+    let tx_modem = Tx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let rx_modem = Rx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
+
+    let mut phy = PhyState::new();
+
+    let running = Arc::new(AtomicBool::new(true));
+    let running2 = running.clone();
+    let (tx_lines, rx_lines) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(l) if l.is_empty() => continue,
+                Ok(l) => { if tx_lines.send(l).is_err() { break; } }
+                Err(_) => break,
+            }
+        }
+        running2.store(false, Ordering::Relaxed);
+    });
+
+    eprintln!("type a line and press Enter to transmit (Ctrl-D to quit)");
+
+    while running.load(Ordering::Relaxed) {
+        let tick_start = Instant::now();
+
+        // TX from stdin
+        while let Ok(line) = rx_lines.try_recv() {
+            if let Some(frame) = node.build_text_frame(BROADCAST, &line) {
+                driver.push_samples(tx_modem.modulate(&frame.to_bytes()));
+                ws.broadcast(&WsEvent::Tx { text: line.clone() });
+                println!("[TX] \"{}\"", line);
+                io::stdout().flush().ok();
+            }
+        }
+
+        // TX from WebSocket
+        while let Ok(cmd) = ws.commands.try_recv() {
+            match cmd {
+                WsCommand::SendText { to, text } => {
+                    if let Some(frame) = node.build_text_frame(to, &text) {
+                        driver.push_samples(tx_modem.modulate(&frame.to_bytes()));
+                        ws.broadcast(&WsEvent::Tx { text: text.clone() });
+                        println!("[WS TX] \"{}\"", text);
+                        io::stdout().flush().ok();
+                    }
+                }
+            }
+        }
+
+        // PHY tick
+        for (msg, fwd) in tick_phy(&mut phy, &mut node, &mut driver, &tx_modem, &rx_modem, samples_per_tick) {
+            if let Some(ref m) = msg {
+                ws.broadcast(&msg_to_ws_event(m));
+                if let Some(t) = m.data.text() {
+                    println!("[RX] !{:08x}: \"{}\"  (hops={})", m.from, t, m.hop_limit);
+                } else {
+                    println!("[RX] !{:08x}: portnum={} len={}", m.from, m.data.portnum, m.data.payload.len());
+                }
+                io::stdout().flush().ok();
+            }
+            if let Some(fwd_frame) = fwd {
+                driver.push_samples(tx_modem.modulate(&fwd_frame.to_bytes()));
+            }
+        }
+
+        let elapsed = tick_start.elapsed();
+        if elapsed < TICK {
+            tokio::time::sleep(TICK - elapsed).await;
+        }
+    }
+    eprintln!("exiting");
 }
 
 // ── Serial mode ──────────────────────────────────────────────────────────────
@@ -539,6 +651,13 @@ fn run_mqtt_mode(cfg: Config) {
         };
         eprintln!("[mqtt] connected, listening...");
 
+        #[cfg(feature = "ws")]
+        let mut ws: Option<WsServer> = None;
+        #[cfg(feature = "ws")]
+        if let Some(port) = cfg.ws_port {
+            ws = Some(spawn_ws_server(port).await.expect("ws server"));
+        }
+
         let mut driver = make_driver(&cfg);
         let tx_modem = Tx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
         let rx_modem = Rx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
@@ -569,12 +688,30 @@ fn run_mqtt_mode(cfg: Config) {
             // ── TX from stdin ────────────────────────────────────────────
             while let Ok(line) = rx_lines.try_recv() {
                 if let Some(frame) = node.build_text_frame(BROADCAST, &line) {
-                    // TX over RF
                     driver.push_samples(tx_modem.modulate(&frame.to_bytes()));
-                    // TX over MQTT
                     bridge.publish_frame(&frame).await;
+                    #[cfg(feature = "ws")]
+                    if let Some(ref ws) = ws { ws.broadcast(&WsEvent::Tx { text: line.clone() }); }
                     println!("[TX] \"{}\"", line);
                     io::stdout().flush().ok();
+                }
+            }
+
+            // ── TX from WebSocket ────────────────────────────────────────
+            #[cfg(feature = "ws")]
+            if let Some(ref mut ws) = ws {
+                while let Ok(cmd) = ws.commands.try_recv() {
+                    match cmd {
+                        WsCommand::SendText { to, text } => {
+                            if let Some(frame) = node.build_text_frame(to, &text) {
+                                driver.push_samples(tx_modem.modulate(&frame.to_bytes()));
+                                bridge.publish_frame(&frame).await;
+                                ws.broadcast(&WsEvent::Tx { text: text.clone() });
+                                println!("[WS TX] \"{}\"", text);
+                                io::stdout().flush().ok();
+                            }
+                        }
+                    }
                 }
             }
 
@@ -583,6 +720,8 @@ fn run_mqtt_mode(cfg: Config) {
                 if let Some(raw) = mqtt_packet_to_raw(&mqtt_rx.packet) {
                     match node.process_rx_frame(&raw) {
                         Ok((Some(msg), fwd)) => {
+                            #[cfg(feature = "ws")]
+                            if let Some(ref ws) = ws { ws.broadcast(&msg_to_ws_event(&msg)); }
                             if let Some(t) = msg.data.text() {
                                 println!("[MQTT RX] !{:08x}: \"{}\"  (hops={})",
                                     msg.from, t, msg.hop_limit);
@@ -591,7 +730,6 @@ fn run_mqtt_mode(cfg: Config) {
                                     msg.from, msg.data.portnum, msg.data.payload.len());
                             }
                             io::stdout().flush().ok();
-                            // Optionally re-broadcast over RF
                             if let Some(fwd_frame) = fwd {
                                 driver.push_samples(tx_modem.modulate(&fwd_frame.to_bytes()));
                             }
@@ -605,6 +743,8 @@ fn run_mqtt_mode(cfg: Config) {
             // ── PHY tick ─────────────────────────────────────────────────
             for (msg, fwd) in tick_phy(&mut phy, &mut node, &mut driver, &tx_modem, &rx_modem, samples_per_tick) {
                 if let Some(ref m) = msg {
+                    #[cfg(feature = "ws")]
+                    if let Some(ref ws) = ws { ws.broadcast(&msg_to_ws_event(m)); }
                     if let Some(t) = m.data.text() {
                         println!("[RF RX] !{:08x}: \"{}\"  (hops={})", m.from, t, m.hop_limit);
                     } else {
@@ -613,9 +753,7 @@ fn run_mqtt_mode(cfg: Config) {
                     io::stdout().flush().ok();
                 }
                 if let Some(fwd_frame) = fwd {
-                    // Forward over RF
                     driver.push_samples(tx_modem.modulate(&fwd_frame.to_bytes()));
-                    // Also bridge to MQTT
                     bridge.publish_frame(&fwd_frame).await;
                 }
             }

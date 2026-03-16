@@ -5,13 +5,15 @@ edition = "2024"
 license = "GPL-3.0-only"
 
 [features]
-default = ["native", "uhd", "mqtt"]
+default = ["native", "uhd", "mqtt", "ws"]
 # Native (non-wasm) build — enables tokio's full async runtime.
 native  = ["tokio/rt", "tokio/rt-multi-thread", "tokio/time", "tokio/sync"]
 # UHD (USRP Hardware Driver) support — forwards to lora crate.
 uhd     = ["lora/uhd"]
 # MQTT bridge support.
 mqtt    = ["dep:rumqttc"]
+# WebSocket server for external tool integration.
+ws      = ["dep:tokio-tungstenite", "dep:futures-util", "dep:serde", "dep:serde_json"]
 # WebAssembly build — uses gloo-timers and wasm-bindgen entry point.
 wasm    = [
     "dep:gloo-timers",
@@ -44,6 +46,12 @@ rustfft = "6"
 
 # MQTT bridge (native only, used by mesh_node --mqtt)
 rumqttc = { version = "0.24", optional = true }
+
+# WebSocket server (native only, used by mesh_node --ws)
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util      = { version = "0.3", optional = true }
+serde             = { version = "1", features = ["derive"], optional = true }
+serde_json        = { version = "1", optional = true }
 
 # Async runtime (native only)
 tokio = { version = "1", default-features = false, optional = true }

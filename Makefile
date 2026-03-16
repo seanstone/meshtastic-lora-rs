@@ -12,6 +12,9 @@ run-node-serial:
 run-node-mqtt:
 	cargo run --bin mesh_node -- --mqtt
 
+run-node-ws:
+	cargo run --bin mesh_node -- --ws
+
 run-node-uhd:
 	cargo run --bin mesh_node -- --uhd --freq 906.875
 
