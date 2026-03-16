@@ -1,0 +1,3 @@
+[submodule "lora-rs"]
+	path = lora-rs
+	url = git@github.com:seanstone/lora-rs.git
