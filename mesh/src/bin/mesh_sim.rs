@@ -111,6 +111,8 @@ struct SimShared {
 
     mode:           Mutex<SimMode>,
     rebuild_nodes:  AtomicBool,
+    node_short:     Mutex<String>,
+    node_long:      Mutex<String>,
 }
 
 impl SimShared {
@@ -148,6 +150,8 @@ impl SimShared {
             tx_queue:       Mutex::new(VecDeque::new()),
             mode:           Mutex::new(SimMode::TwoNodeTest),
             rebuild_nodes:  AtomicBool::new(false),
+            node_short:     Mutex::new("TERM".into()),
+            node_long:      Mutex::new("Mesh Terminal".into()),
         })
     }
 }
@@ -244,7 +248,9 @@ fn build_nodes(mode: SimMode, shared: &SimShared) -> Nodes {
             Nodes::TwoNode { tx_node, rx_node }
         }
         SimMode::Terminal => {
-            let node = MeshNode::with_identity(channel_cfg, "TERM", "Mesh Terminal");
+            let short = shared.node_short.lock().unwrap().clone();
+            let long  = shared.node_long.lock().unwrap().clone();
+            let node = MeshNode::with_identity(channel_cfg, &short, &long);
             *shared.a_id.lock().unwrap() = format!("!{:08x}", node.node_id());
             *shared.b_id.lock().unwrap() = String::new();
             *shared.b_neighbours.lock().unwrap() = vec![];
@@ -547,6 +553,8 @@ struct MeshSimApp {
     auto_tx:         bool,
     msg_input:       String,
     mode:            SimMode,
+    node_short:      String,
+    node_long:       String,
 }
 
 impl MeshSimApp {
@@ -585,6 +593,8 @@ impl MeshSimApp {
             auto_tx:         true,
             msg_input:       String::new(),
             mode:            SimMode::TwoNodeTest,
+            node_short:      "TERM".into(),
+            node_long:       "Mesh Terminal".into(),
         }
     }
 
@@ -824,6 +834,27 @@ impl eframe::App for MeshSimApp {
                 }
             } else {
                 ui.label(format!("ID  {a_id}"));
+                ui.horizontal(|ui| {
+                    ui.label("Short");
+                    if ui.add(
+                        egui::TextEdit::singleline(&mut self.node_short)
+                            .desired_width(40.0)
+                            .char_limit(4),
+                    ).lost_focus() {
+                        *self.shared.node_short.lock().unwrap() = self.node_short.clone();
+                        self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    if ui.add(
+                        egui::TextEdit::singleline(&mut self.node_long)
+                            .desired_width(ui.available_width()),
+                    ).lost_focus() {
+                        *self.shared.node_long.lock().unwrap() = self.node_long.clone();
+                        self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
+                    }
+                });
                 ui.add_space(4.0);
                 ui.label("Neighbours:");
                 for n in self.shared.a_neighbours.lock().unwrap().iter() {
