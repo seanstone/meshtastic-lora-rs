@@ -164,6 +164,16 @@ server runs alongside as an additional I/O channel.
 cargo run --bin gui_sim
 ```
 
+### Examples & guides
+
+See [docs/examples.md](docs/examples.md) for detailed walkthroughs:
+- What is Meshtastic / LoRa (background for newcomers)
+- Exploring the GUI simulator
+- Talking to a real Meshtastic radio over MQTT
+- Building a Home Assistant alert bridge
+- Monitoring a mesh network from a web dashboard
+- Setting up a USRP SDR gateway
+
 ---
 
 ## Key design decisions
