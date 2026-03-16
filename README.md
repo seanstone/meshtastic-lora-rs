@@ -10,35 +10,6 @@ routing, duty-cycle enforcement, protobuf types, and the application interface
 
 ---
 
-## Status
-
-All seven implementation phases are complete and the workspace compiles cleanly.
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| 1a | Sync word parameterised + validated in `frame_sync` | ✅ done |
-| 1b | BW 62.5 kHz added to GUI sim | ✅ done |
-| 1c | Preamble length wired through `SimShared` at runtime | ✅ done |
-| 2 | Cargo workspace + `mesh` crate skeleton | ✅ done |
-| 3 | MAC layer — OTA framing, AES-256-CTR, duty-cycle tracker | ✅ done |
-| 4 | Protobuf types — `Data`, `User`, `PortNum` (hand-written prost) | ✅ done |
-| 5 | Mesh layer — flood router, dedup cache, node identity, neighbour table | ✅ done |
-| 6 | Application interface — `MeshNode`, `ChannelConfig`, `ProcessError` | ✅ done |
-| 7 | Simulation driver — two-node egui GUI sim (`mesh_sim` binary) | ✅ done |
-
-### lora-rs library additions
-
-Two new public modules were added to the `lora` crate to support the mesh layer:
-
-| Module | Contents |
-|--------|----------|
-| `lora::modem` | `Tx` — encodes bytes → IQ; `Rx` — decodes IQ → bytes; `DecodeResult` |
-| `lora::channel` | `Driver` trait (IQ transport abstraction); `Channel` (AWGN sim) |
-
-The `gui_sim` binary now uses these library types rather than its own copies.
-
----
-
 ## Architecture
 
 ```
