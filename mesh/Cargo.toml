@@ -1,0 +1,36 @@
+[package]
+name    = "mesh"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+
+[features]
+default = ["native"]
+# Native (non-wasm) build — enables tokio's full async runtime.
+native  = ["tokio/rt", "tokio/rt-multi-thread", "tokio/time", "tokio/sync"]
+# WebAssembly build — disables tokio, uses gloo-timers instead.
+wasm    = ["dep:gloo-timers"]
+
+[dependencies]
+# PHY layer (submodule — no C deps, no UHD, no GUI)
+lora = { path = "../lora-rs", default-features = false }
+
+# AES-256-CTR encryption (pure Rust, no_std-compatible)
+aes = "0.8"
+ctr = "0.9"
+
+# Protobuf encode/decode
+prost = "0.13"
+
+# Random node ID generation
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+
+# Async runtime (native only)
+tokio = { version = "1", default-features = false, optional = true }
+
+# WASM async timers
+gloo-timers = { version = "0.3", features = ["futures"], optional = true }
+
+[build-dependencies]
+# Uncomment when adding .proto compilation in a future phase:
+# prost-build = "0.13"

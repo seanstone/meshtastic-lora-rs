@@ -1,0 +1,3 @@
+[workspace]
+members = ["lora-rs", "mesh"]
+resolver = "2"
