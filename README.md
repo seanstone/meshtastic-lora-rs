@@ -68,7 +68,8 @@ meshtastic-lora-rs/
 │       ├── presets.rs       — ModemPreset + all 9 Meshtastic presets
 │       ├── app.rs           — MeshNode public API
 │       └── bin/
-│           └── mesh_sim.rs  — two-node egui simulation binary
+│           ├── mesh_sim.rs  — two-node egui simulation binary
+│           └── mesh_node.rs — headless node (stdin/stdout + UHD)
 └── Cargo.toml               — workspace root
 ```
 
@@ -77,8 +78,14 @@ meshtastic-lora-rs/
 ## Running the simulation
 
 ```sh
-# Two-node mesh sim with egui GUI
-cargo run --bin mesh_sim
+# Two-node mesh sim with egui GUI (default binary)
+cargo run
+
+# Headless node — type messages, see received packets
+cargo run --bin mesh_node
+
+# Headless node with real RF (USRP)
+cargo run --bin mesh_node -- --uhd --freq 906.875
 
 # Original LoRa PHY GUI simulator
 cargo run --bin gui_sim
@@ -108,6 +115,62 @@ boundary.**  The caller owns the IQ pipeline and calls `process_rx_frame` with
 raw decoded bytes; the node returns `(Option<MeshMessage>, Option<MeshFrame>)`
 (deliver, forward).  This keeps the mesh layer testable without a running
 tokio runtime.
+
+---
+
+## Data I/O integration roadmap
+
+The mesh stack is designed to support multiple external data interfaces.
+Each step builds on the same `MeshNode` API (`build_text_frame`,
+`process_rx_frame`) and the `lora::channel::Driver` trait (Sim / UHD).
+
+| Step | Interface | What it enables |
+|------|-----------|-----------------|
+| **A** | `mesh_node` headless binary (stdin/stdout + UHD) | Real RF testing against off-the-shelf Meshtastic radios |
+| **B** | `FromRadio` / `ToRadio` serial protobuf API | Full Meshtastic toolchain: Python CLI, web client, mobile apps via USB |
+| **C** | MQTT bridge (`msh/+/+/#`) | Internet ↔ mesh bridging, compatible with `mqtt.meshtastic.org` |
+| **D** | WebSocket API for the WASM GUI | Browser-based sim with external message injection |
+| **E** | BLE GATT service (`6ba1b218-…`) | Direct Android / iOS Meshtastic app connection |
+
+### A — Headless node (implemented)
+
+Single-node binary: reads lines from stdin, transmits as `TEXT_MESSAGE_APP`,
+prints received messages to stdout.  Supports both simulated channel and UHD
+for real RF.
+
+```sh
+# Simulated (loopback — useful for protocol testing)
+cargo run --bin mesh_node
+
+# Real RF via USRP
+cargo run --bin mesh_node -- --uhd --freq 906.875
+```
+
+### B — Serial protobuf API
+
+Implement the Meshtastic serial framing protocol over a virtual serial port
+(or raw USB CDC).  Requires generating the full `FromRadio` / `ToRadio`
+protobuf types from the official
+[meshtastic/protobufs](https://github.com/meshtastic/protobufs) repo
+(add as a second git submodule, compile with `prost-build`).
+
+### C — MQTT bridge
+
+Connect to an MQTT broker, subscribe to `msh/{channel}/{gateway}/#`, and
+bridge packets between the mesh and the internet.  Uses `rumqttc` (async
+MQTT, tokio-compatible).
+
+### D — WebSocket (WASM)
+
+Expose a WebSocket endpoint from the browser-based mesh_sim for external
+tools (Node.js scripts, Home Assistant, dashboards) to send/receive
+messages as JSON.
+
+### E — BLE GATT
+
+Advertise the Meshtastic BLE GATT service so Android/iOS apps can connect
+directly.  Platform-specific (`btleplug` / `bluer`); defer until the core
+protocol is stable.
 
 ---
 

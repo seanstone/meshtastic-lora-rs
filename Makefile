@@ -3,6 +3,12 @@
 run:
 	cargo run --bin mesh_sim
 
+run-node:
+	cargo run --bin mesh_node
+
+run-node-uhd:
+	cargo run --bin mesh_node -- --uhd --freq 906.875
+
 run-gui-sim:
 	cargo run --bin gui_sim
 
