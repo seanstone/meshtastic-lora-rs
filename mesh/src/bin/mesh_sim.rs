@@ -317,6 +317,24 @@ impl MeshSimApp {
         *self.shared.sf.lock().unwrap() = p.sf;
     }
 
+    fn restore_defaults(&mut self) {
+        self.preset_idx  = 5; // LongFast
+        self.sf          = 11;
+        self.signal_db   = -20.0;
+        self.noise_db    = -60.0;
+        self.interval_ms = 2000;
+        *self.shared.sf.lock().unwrap()          = self.sf;
+        *self.shared.signal_db.lock().unwrap()   = self.signal_db;
+        *self.shared.noise_db.lock().unwrap()    = self.noise_db;
+        *self.shared.interval_ms.lock().unwrap() = self.interval_ms;
+    }
+
+    fn reset_stats(&self) {
+        self.shared.tx_count.store(0, Ordering::Relaxed);
+        self.shared.rx_count.store(0, Ordering::Relaxed);
+        self.shared.log.lock().unwrap().clear();
+    }
+
     fn snr_db(&self) -> f32 { self.signal_db - self.noise_db }
 }
 
@@ -369,10 +387,15 @@ impl eframe::App for MeshSimApp {
             }
 
             ui.add_space(6.0);
-            let running = self.shared.running.load(Ordering::Relaxed);
-            if ui.button(if running { "⏸ Pause" } else { "▶ Resume" }).clicked() {
-                self.shared.running.store(!running, Ordering::Relaxed);
-            }
+            ui.horizontal(|ui| {
+                let running = self.shared.running.load(Ordering::Relaxed);
+                if ui.button(if running { "⏸ Pause" } else { "▶ Resume" }).clicked() {
+                    self.shared.running.store(!running, Ordering::Relaxed);
+                }
+                if ui.button("Defaults").clicked() {
+                    self.restore_defaults();
+                }
+            });
 
             ui.separator();
 
@@ -383,6 +406,9 @@ impl eframe::App for MeshSimApp {
             ui.label(format!("RX  {rx}"));
             if tx > 0 {
                 ui.label(format!("PER  {:.1}%", (tx - rx.min(tx)) as f32 / tx as f32 * 100.0));
+            }
+            if ui.small_button("Reset stats").clicked() {
+                self.reset_stats();
             }
 
             ui.separator();
