@@ -582,6 +582,7 @@ impl MeshSimApp {
         let wf_secs = FFT_SIZE as f64 * 512.0 / SR_HZ as f64;
         waterfall_chart.set_y_time_display(wf_secs);
 
+        let init_uhd = shared.use_uhd.load(Ordering::Relaxed);
         Self {
             shared,
             sf: DEFAULT_SF,
@@ -591,7 +592,7 @@ impl MeshSimApp {
             preset_idx: DEFAULT_PRESET_IDX,
             spectrum_chart,
             waterfall_chart,
-            use_uhd:        shared.use_uhd.load(Ordering::Relaxed),
+            use_uhd:        init_uhd,
             uhd_args:        String::new(),
             uhd_freq_mhz:   915.0,
             uhd_rx_gain_db:  40.0,
