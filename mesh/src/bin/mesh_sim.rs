@@ -591,7 +591,7 @@ impl MeshSimApp {
             preset_idx: DEFAULT_PRESET_IDX,
             spectrum_chart,
             waterfall_chart,
-            use_uhd:        false,
+            use_uhd:        shared.use_uhd.load(Ordering::Relaxed),
             uhd_args:        String::new(),
             uhd_freq_mhz:   915.0,
             uhd_rx_gain_db:  40.0,
@@ -1028,6 +1028,20 @@ fn main() {}
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let shared = SimShared::new();
+
+    // Auto-detect USRP at startup.
+    #[cfg(feature = "uhd")]
+    {
+        eprint!("[uhd] probing for USRP… ");
+        if lora::uhd::probe() {
+            eprintln!("found — switching to UHD mode");
+            shared.use_uhd.store(true, Ordering::Relaxed);
+            shared.rebuild_driver.store(true, Ordering::Relaxed);
+        } else {
+            eprintln!("none found — using simulator");
+        }
+    }
+
     let shared_sim = Arc::clone(&shared);
 
     std::thread::spawn(move || {
