@@ -36,6 +36,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: Install wasm-bindgen-cli
         run: cargo install wasm-bindgen-cli
 
