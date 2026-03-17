@@ -1,8 +1,9 @@
 [package]
-name    = "mesh"
-version = "0.1.0"
-edition = "2024"
-license = "GPL-3.0-only"
+name        = "mesh"
+version     = "0.1.0"
+edition     = "2024"
+license     = "GPL-3.0-only"
+default-run = "mesh_radio"
 
 [features]
 default = ["native", "uhd", "mqtt", "ws"]
