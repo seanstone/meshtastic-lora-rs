@@ -87,7 +87,7 @@ The GUI simulator runs two virtual Meshtastic nodes communicating over a
 simulated AWGN (noise) channel.  No hardware needed.
 
 ```
-  ┌─────────────────── mesh_sim ───────────────────────┐
+  ┌─────────────────── mesh_radio ───────────────────────┐
   │                                                     │
   │  ┌──────────┐    AWGN Channel    ┌──────────┐      │
   │  │  Node A  │ ──── IQ + noise ──>│  Node B  │      │
@@ -556,7 +556,7 @@ clients.  Messages from MQTT or WebSocket are transmitted on RF.
 ### Step 4: Use the GUI simulator with real RF
 
 ```sh
-cargo run --bin mesh_sim
+cargo run --bin mesh_radio
 ```
 
 In the left panel, switch from "Sim" to "UHD", enter the frequency, and
@@ -572,7 +572,7 @@ The GUI simulator compiles to WebAssembly and runs in any modern browser.
 ```
   ┌──────────── Browser ──────────────┐
   │                                    │
-  │  index.html + mesh_sim.wasm        │
+  │  index.html + mesh_radio.wasm        │
   │     |                              │
   │     v                              │
   │  ┌───────────────────────────┐     │

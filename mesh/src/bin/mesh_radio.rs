@@ -3,7 +3,7 @@
 /// Supports both a simulated AWGN channel and real RF via UHD (USRP).
 /// Compiles to native (tokio) and WASM (gloo-timers).
 ///
-/// Run native:  cargo run --bin mesh_sim
+/// Run native:  cargo run --bin mesh_radio
 /// Build WASM:  trunk build --release
 
 use std::{
@@ -1052,12 +1052,12 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Mesh Sim")
+            .with_title("Mesh Radio")
             .with_inner_size([960.0, 700.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "Mesh Sim",
+        "Mesh Radio",
         options,
         Box::new(|_cc| Ok(Box::new(MeshSimApp::new(shared)))),
     )

@@ -1,7 +1,7 @@
 # ── Native ────────────────────────────────────────────────────────────────────
 
 run:
-	cargo run --bin mesh_sim
+	cargo run --bin mesh_radio
 
 run-node:
 	cargo run --bin mesh_node
@@ -28,11 +28,11 @@ WASM_OUT     = dist
 WASM_PROFILE = release
 
 wasm: ## Build WASM and prepare dist/
-	cargo build --target $(WASM_TARGET) --bin mesh_sim \
+	cargo build --target $(WASM_TARGET) --bin mesh_radio \
 		--no-default-features --features wasm --$(WASM_PROFILE)
 	@mkdir -p $(WASM_OUT)
 	wasm-bindgen \
-		target/$(WASM_TARGET)/$(WASM_PROFILE)/mesh_sim.wasm \
+		target/$(WASM_TARGET)/$(WASM_PROFILE)/mesh_radio.wasm \
 		--out-dir $(WASM_OUT) \
 		--target web \
 		--no-typescript
@@ -44,7 +44,7 @@ wasm-serve: wasm ## Build and serve locally
 	python3 -m http.server 3000 --directory $(WASM_OUT)
 
 wasm-opt: wasm ## Build with wasm-opt size optimization
-	wasm-opt -Oz $(WASM_OUT)/mesh_sim_bg.wasm -o $(WASM_OUT)/mesh_sim_bg.wasm
+	wasm-opt -Oz $(WASM_OUT)/mesh_radio_bg.wasm -o $(WASM_OUT)/mesh_radio_bg.wasm
 	@echo "✓ wasm-opt applied"
 
 clean-wasm:

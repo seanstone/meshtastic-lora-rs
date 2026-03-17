@@ -28,7 +28,7 @@ wasm    = [
 # PHY layer (submodule — no C deps by default; UHD gated on feature)
 lora = { path = "../lora-rs", default-features = false }
 
-# GUI (used by the mesh_sim binary)
+# GUI (used by the mesh_radio binary)
 egui      = "0.33"
 eframe    = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
 
@@ -42,7 +42,7 @@ prost = "0.13"
 # Random node ID generation
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 
-# FFT for spectrum analyzer (used by mesh_sim binary via lora::ui types)
+# FFT for spectrum analyzer (used by mesh_radio binary via lora::ui types)
 rustfft = "6"
 
 # MQTT bridge (native only, used by mesh_node --mqtt)

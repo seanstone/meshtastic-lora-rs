@@ -78,7 +78,7 @@ meshtastic-lora-rs/
 │       ├── mqtt.rs          — MQTT bridge (rumqttc, ServiceEnvelope)
 │       ├── ws.rs            — WebSocket server (tokio-tungstenite, JSON)
 │       └── bin/
-│           ├── mesh_sim.rs  — two-node egui simulation (spectrum + waterfall)
+│           ├── mesh_radio.rs  — two-node egui simulation (spectrum + waterfall)
 │           └── mesh_node.rs — headless node (text / serial / MQTT)
 ├── protobufs/               — meshtastic/protobufs submodule (.proto files)
 ├── web/                     — WASM build assets
@@ -101,7 +101,7 @@ cargo run
 make wasm-serve   # serves on http://localhost:3000
 ```
 
-The `mesh_sim` GUI shows a left settings panel (preset selector, SF, TX/RX
+The `mesh_radio` GUI shows a left settings panel (preset selector, SF, TX/RX
 gain, driver selection Sim/UHD, node info) and a central panel with live
 spectrum, waterfall, and a scrolling mesh message log.
 
@@ -205,7 +205,7 @@ share the same PHY tick loop and `MeshNode` instance.
 
 ## Roadmap
 
-### mesh_sim → RF communications terminal
+### mesh_radio → RF communications terminal
 
 | # | Change | Status |
 |---|--------|--------|

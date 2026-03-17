@@ -41,11 +41,11 @@ jobs:
 
       - name: Build WASM
         run: |
-          cargo build --target wasm32-unknown-unknown --bin mesh_sim \
+          cargo build --target wasm32-unknown-unknown --bin mesh_radio \
             --no-default-features --features wasm --release
           mkdir -p dist
           wasm-bindgen \
-            target/wasm32-unknown-unknown/release/mesh_sim.wasm \
+            target/wasm32-unknown-unknown/release/mesh_radio.wasm \
             --out-dir dist \
             --target web \
             --no-typescript
@@ -54,7 +54,7 @@ jobs:
       - name: Install wasm-opt
         run: |
           npm install -g binaryen
-          wasm-opt -Oz dist/mesh_sim_bg.wasm -o dist/mesh_sim_bg.wasm
+          wasm-opt -Oz dist/mesh_radio_bg.wasm -o dist/mesh_radio_bg.wasm
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
