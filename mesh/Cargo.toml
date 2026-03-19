@@ -46,6 +46,9 @@ rand = { version = "0.8", default-features = false, features = ["std", "std_rng"
 # FFT for spectrum analyzer (used by mesh_radio binary via lora::ui types)
 rustfft = "6"
 
+# QR code generation (used by mesh_radio for repo link)
+qrcode = "0.14"
+
 # MQTT bridge (native only, used by mesh_node --mqtt)
 rumqttc = { version = "0.24", optional = true }
 

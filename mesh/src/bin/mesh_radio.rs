@@ -49,6 +49,7 @@ const MOBILE_BREAKPOINT: f32 = 600.0;
 // ── GitHub icon ─────────────────────────────────────────────────────────────
 
 const GITHUB_ICON: char = egui::special_emojis::GITHUB;
+const REPO_URL: &str = "https://github.com/seanstone/meshtastic-lora-rs";
 
 // ── Operating mode ──────────────────────────────────────────────────────────
 
@@ -570,6 +571,9 @@ struct MeshSimApp {
     // Mobile layout state.
     menu_open:       bool,
     msg_drawer_open: bool,
+    // QR code popup.
+    show_qr:         bool,
+    qr_texture:      Option<egui::TextureHandle>,
 }
 
 impl MeshSimApp {
@@ -615,6 +619,8 @@ impl MeshSimApp {
             tx_dest_input:   String::new(),
             menu_open:       false,
             msg_drawer_open: false,
+            show_qr:         false,
+            qr_texture:      None,
         }
     }
 
@@ -645,6 +651,38 @@ impl MeshSimApp {
 
     fn trigger_rebuild(&self) {
         self.shared.rebuild_driver.store(true, Ordering::Relaxed);
+    }
+
+    /// Get or create the QR code texture for the GitHub repo URL.
+    fn qr_texture(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
+        if let Some(ref tex) = self.qr_texture {
+            return tex.clone();
+        }
+        use qrcode::{QrCode, EcLevel};
+        let code = QrCode::with_error_correction_level(REPO_URL, EcLevel::M)
+            .expect("QR encode");
+        let modules = code.to_colors();
+        let w = code.width() as usize;
+        // Add a 2-module quiet zone on each side.
+        let qz = 2;
+        let size = w + 2 * qz;
+        let mut pixels = vec![egui::Color32::WHITE; size * size];
+        for (i, &dark) in modules.iter().enumerate() {
+            let row = i / w;
+            let col = i % w;
+            if dark == qrcode::Color::Dark {
+                pixels[(row + qz) * size + (col + qz)] = egui::Color32::BLACK;
+            }
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [size, size],
+            &pixels.iter()
+                .flat_map(|c| [c.r(), c.g(), c.b(), c.a()])
+                .collect::<Vec<u8>>(),
+        );
+        let tex = ctx.load_texture("qr_github", image, egui::TextureOptions::NEAREST);
+        self.qr_texture = Some(tex.clone());
+        tex
     }
 
     fn snr_db(&self) -> f32 { self.signal_db - self.noise_db }
@@ -984,6 +1022,26 @@ impl eframe::App for MeshSimApp {
             });
         }
 
+        // QR code popup window.
+        if self.show_qr {
+            let tex = self.qr_texture(ctx);
+            let mut open = self.show_qr;
+            egui::Window::new("QR Code")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    let qr_size = 200.0;
+                    ui.vertical_centered(|ui| {
+                        ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(qr_size, qr_size)));
+                        ui.add_space(4.0);
+                        ui.hyperlink_to(REPO_URL, REPO_URL);
+                    });
+                });
+            self.show_qr = open;
+        }
+
         let screen_w = ctx.input(|i| i.screen_rect().width());
         let is_mobile = screen_w < MOBILE_BREAKPOINT;
 
@@ -1029,8 +1087,11 @@ impl MeshSimApp {
             ui.horizontal(|ui| {
                 ui.hyperlink_to(
                     format!("{GITHUB_ICON} meshtastic-lora-rs"),
-                    "https://github.com/seanstone/meshtastic-lora-rs",
+                    REPO_URL,
                 );
+                if ui.small_button("⊞").on_hover_text("Show QR code").clicked() {
+                    self.show_qr = !self.show_qr;
+                }
             });
         });
 
@@ -1112,10 +1173,7 @@ impl MeshSimApp {
                     }
 
                     // GitHub icon.
-                    ui.hyperlink_to(
-                        GITHUB_ICON.to_string(),
-                        "https://github.com/seanstone/meshtastic-lora-rs",
-                    );
+                    ui.hyperlink_to(GITHUB_ICON.to_string(), REPO_URL);
 
                     // Driver indicator.
                     let drv = if self.use_uhd { "UHD" } else { "Sim" };
