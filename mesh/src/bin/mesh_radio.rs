@@ -1020,6 +1020,13 @@ impl MeshSimApp {
             ui.separator();
             ui.heading("Nodes");
             self.ui_nodes_info(ui);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.hyperlink_to("GitHub", "https://github.com/seanstone/meshtastic-lora-rs");
+                ui.label("·");
+                ui.hyperlink_to("lora-rs", "https://github.com/seanstone/lora-rs");
+            });
         });
 
         // Central: spectrum + waterfall + messages.
@@ -1098,6 +1105,9 @@ impl MeshSimApp {
                     if ui.button(msg_label).clicked() {
                         self.msg_drawer_open = !self.msg_drawer_open;
                     }
+
+                    // GitHub link.
+                    ui.hyperlink_to("GH", "https://github.com/seanstone/meshtastic-lora-rs");
 
                     // Driver indicator.
                     let drv = if self.use_uhd { "UHD" } else { "Sim" };
