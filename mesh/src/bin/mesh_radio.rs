@@ -533,8 +533,10 @@ async fn sim_loop(shared: Arc<SimShared>) {
 
         loop {
             match rx_modem.decode_streaming(&rx_buffer) {
-                StreamDecodeResult::Ok { payload, consumed } => {
+                StreamDecodeResult::Ok { payload, consumed, freq_offset_bins } => {
                     rx_buffer.drain(..consumed);
+                    let bw_hz = SR_HZ as f64 / OS_FACTOR as f64;
+                    let off_hz = freq_offset_bins * bw_hz / (1u64 << sf) as f64;
                     match nodes.rx_node_mut().process_rx_frame(&payload) {
                         Ok((Some(msg), fwd)) => {
                             if !msg.self_origin {
@@ -545,7 +547,12 @@ async fn sim_loop(shared: Arc<SimShared>) {
                             } else {
                                 format!("portnum={} len={}", msg.data.portnum, msg.data.payload.len())
                             };
-                            push_log_full(&shared, MsgDir::Rx, label,
+                            let off_str = if off_hz.abs() > 10.0 {
+                                format!(" [{off_hz:+.0}Hz]")
+                            } else {
+                                String::new()
+                            };
+                            push_log_full(&shared, MsgDir::Rx, format!("{label}{off_str}"),
                                 Some(msg.from), Some(msg.hop_limit), msg.self_origin);
                             if tx_allowed {
                                 if let Some(fwd_frame) = fwd {
@@ -566,10 +573,12 @@ async fn sim_loop(shared: Arc<SimShared>) {
                         Err(e) => push_log(&shared, MsgDir::Error, format!("{e}")),
                     }
                 }
-                StreamDecodeResult::CrcFail { payload_len, cr, has_crc, consumed } => {
+                StreamDecodeResult::CrcFail { payload_len, cr, has_crc, consumed, freq_offset_bins } => {
                     rx_buffer.drain(..consumed);
+                    let bw_hz = SR_HZ as f64 / OS_FACTOR as f64;
+                    let off_hz = freq_offset_bins * bw_hz / (1u64 << sf) as f64;
                     push_log(&shared, MsgDir::Error,
-                        format!("CRC fail (hdr: len={payload_len} cr=4/{} crc={})",
+                        format!("CRC fail (hdr: len={payload_len} cr=4/{} crc={}) [{off_hz:+.0}Hz]",
                             cr + 4, if has_crc { "yes" } else { "no" }));
                 }
                 StreamDecodeResult::None => break,
