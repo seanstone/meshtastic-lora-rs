@@ -97,13 +97,31 @@ impl MeshNode {
         }
     }
 
-    /// Create a node with explicit identity.
+    /// Create a node with explicit identity (random ID).
     pub fn with_identity(
         channel:    ChannelConfig,
         short_name: impl Into<String>,
         long_name:  impl Into<String>,
     ) -> Self {
         let local  = LocalNode::new(short_name, long_name);
+        let crypto = MeshCrypto::new(channel.psk);
+        Self {
+            local,
+            crypto,
+            channel,
+            dedup: DedupCache::new(),
+            neighbours: NeighbourTable::default(),
+        }
+    }
+
+    /// Create a node with a specific ID (for persistent identity across restarts).
+    pub fn with_id(
+        channel:    ChannelConfig,
+        node_id:    u32,
+        short_name: impl Into<String>,
+        long_name:  impl Into<String>,
+    ) -> Self {
+        let local  = LocalNode::with_id(node_id, short_name, long_name);
         let crypto = MeshCrypto::new(channel.psk);
         Self {
             local,

@@ -123,6 +123,10 @@ struct SimShared {
     rebuild_nodes:  AtomicBool,
     node_short:     Mutex<String>,
     node_long:      Mutex<String>,
+    /// Persistent node IDs — generated once, reused across mode switches.
+    node_id_a:      Mutex<u32>,
+    node_id_b:      Mutex<u32>,
+    node_id_single: Mutex<u32>,
     tx_dest:        Mutex<u32>,
 }
 
@@ -163,6 +167,9 @@ impl SimShared {
             rebuild_nodes:  AtomicBool::new(false),
             node_short:     Mutex::new("TERM".into()),
             node_long:      Mutex::new("Mesh Terminal".into()),
+            node_id_a:      Mutex::new(rand::random::<u32>()),
+            node_id_b:      Mutex::new(rand::random::<u32>()),
+            node_id_single: Mutex::new(rand::random::<u32>()),
             tx_dest:        Mutex::new(BROADCAST),
         })
     }
@@ -257,17 +264,20 @@ fn build_nodes(mode: SimMode, shared: &SimShared) -> Nodes {
     let channel_cfg = ChannelConfig::default();
     match mode {
         SimMode::TwoNodeTest => {
-            let tx_node = MeshNode::with_identity(channel_cfg.clone(), "MSIM", "Mesh-Sim Node A");
-            let rx_node = MeshNode::with_identity(channel_cfg, "MRCV", "Mesh-Sim Node B");
-            *shared.a_id.lock().unwrap() = format!("!{:08x}", tx_node.node_id());
-            *shared.b_id.lock().unwrap() = format!("!{:08x}", rx_node.node_id());
+            let id_a = *shared.node_id_a.lock().unwrap();
+            let id_b = *shared.node_id_b.lock().unwrap();
+            let tx_node = MeshNode::with_id(channel_cfg.clone(), id_a, "MSIM", "Mesh-Sim Node A");
+            let rx_node = MeshNode::with_id(channel_cfg, id_b, "MRCV", "Mesh-Sim Node B");
+            *shared.a_id.lock().unwrap() = format!("!{:08x}", id_a);
+            *shared.b_id.lock().unwrap() = format!("!{:08x}", id_b);
             Nodes::TwoNode { tx_node, rx_node }
         }
         SimMode::Terminal | SimMode::Listen => {
+            let id    = *shared.node_id_single.lock().unwrap();
             let short = shared.node_short.lock().unwrap().clone();
             let long  = shared.node_long.lock().unwrap().clone();
-            let node = MeshNode::with_identity(channel_cfg, &short, &long);
-            *shared.a_id.lock().unwrap() = format!("!{:08x}", node.node_id());
+            let node = MeshNode::with_id(channel_cfg, id, &short, &long);
+            *shared.a_id.lock().unwrap() = format!("!{:08x}", id);
             *shared.b_id.lock().unwrap() = String::new();
             *shared.b_neighbours.lock().unwrap() = vec![];
             Nodes::Single { node }
