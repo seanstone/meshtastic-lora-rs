@@ -573,6 +573,7 @@ struct MeshSimApp {
     node_long:       String,
     tx_dest:         u32,
     tx_dest_input:   String,
+    last_synced_x:   [f64; 2],
     // Mobile layout state.
     menu_open:       bool,
     msg_drawer_open: bool,
@@ -628,6 +629,7 @@ impl MeshSimApp {
             node_long:       "Mesh Terminal".into(),
             tx_dest:         BROADCAST,
             tx_dest_input:   String::new(),
+            last_synced_x:   [0.0, FFT_SIZE as f64],
             menu_open:       false,
             msg_drawer_open: false,
             show_qr:         false,
@@ -1100,6 +1102,18 @@ impl eframe::App for MeshSimApp {
             self.update_mobile(ctx);
         } else {
             self.update_desktop(ctx);
+        }
+
+        // Cross-sync X bounds: whichever chart changed since last frame
+        // propagates its new range to the other one next frame.
+        let sx = self.spectrum_chart.last_x_bounds();
+        let wx = self.waterfall_chart.last_x_bounds();
+        if sx != self.last_synced_x {
+            self.waterfall_chart.sync_x_bounds(sx);
+            self.last_synced_x = sx;
+        } else if wx != self.last_synced_x {
+            self.spectrum_chart.sync_x_bounds(wx);
+            self.last_synced_x = wx;
         }
     }
 }
