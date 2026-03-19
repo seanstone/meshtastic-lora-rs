@@ -61,6 +61,9 @@ enum SimMode {
     /// Single node (terminal).  Manual + auto TX/RX on the same node.
     /// Use with UHD to talk to real Meshtastic radios.
     Terminal,
+    /// RX-only mode.  No TX at all — no beacons, no forwarding, no user messages.
+    /// The USRP stays completely silent.  Good for passive monitoring.
+    Listen,
 }
 
 // ── Platform helpers ─────────────────────────────────────────────────────────
@@ -260,7 +263,7 @@ fn build_nodes(mode: SimMode, shared: &SimShared) -> Nodes {
             *shared.b_id.lock().unwrap() = format!("!{:08x}", rx_node.node_id());
             Nodes::TwoNode { tx_node, rx_node }
         }
-        SimMode::Terminal => {
+        SimMode::Terminal | SimMode::Listen => {
             let short = shared.node_short.lock().unwrap().clone();
             let long  = shared.node_long.lock().unwrap().clone();
             let node = MeshNode::with_identity(channel_cfg, &short, &long);
@@ -322,6 +325,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
             push_log(&shared, MsgDir::System, match new_mode {
                 SimMode::TwoNodeTest => "Mode → Two-Node Test".into(),
                 SimMode::Terminal    => "Mode → Terminal".into(),
+                SimMode::Listen      => "Mode → Listen (RX only)".into(),
             });
         }
 
@@ -423,20 +427,25 @@ async fn sim_loop(shared: Arc<SimShared>) {
             driver.clear();
         }
 
+        let cur_mode = *shared.mode.lock().unwrap();
+        let tx_allowed = cur_mode != SimMode::Listen;
+
         // ── NodeInfo beacon ──────────────────────────────────────────────
         if produced >= next_beacon_at {
             next_beacon_at = produced + BEACON_INTERVAL;
 
-            // TX node always beacons.
-            if let Some(frame) = nodes.tx_node().build_nodeinfo_frame() {
-                let iq = tx_modem.modulate(&frame.to_bytes());
-                driver.push_samples(iq);
-            }
-            // In TwoNodeTest mode, RX node also beacons.
-            if let Nodes::TwoNode { rx_node, .. } = &nodes {
-                if let Some(frame) = rx_node.build_nodeinfo_frame() {
+            if tx_allowed {
+                // TX node always beacons.
+                if let Some(frame) = nodes.tx_node().build_nodeinfo_frame() {
                     let iq = tx_modem.modulate(&frame.to_bytes());
                     driver.push_samples(iq);
+                }
+                // In TwoNodeTest mode, RX node also beacons.
+                if let Nodes::TwoNode { rx_node, .. } = &nodes {
+                    if let Some(frame) = rx_node.build_nodeinfo_frame() {
+                        let iq = tx_modem.modulate(&frame.to_bytes());
+                        driver.push_samples(iq);
+                    }
                 }
             }
 
@@ -452,7 +461,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
         let tx_dest = *shared.tx_dest.lock().unwrap();
 
         // ── Manual TX (drain user-typed messages) ─────────────────────────
-        {
+        if tx_allowed {
             let manual: Vec<String> = shared.tx_queue.lock().unwrap().drain(..).collect();
             for text in manual {
                 if let Some(frame) = nodes.tx_node().build_text_frame(tx_dest, &text) {
@@ -462,10 +471,12 @@ async fn sim_loop(shared: Arc<SimShared>) {
                     driver.push_samples(iq);
                 }
             }
+        } else {
+            shared.tx_queue.lock().unwrap().clear();
         }
 
         // ── Auto TX ─────────────────────────────────────────────────────────
-        if shared.auto_tx.load(Ordering::Relaxed) && produced >= next_tx_at {
+        if tx_allowed && shared.auto_tx.load(Ordering::Relaxed) && produced >= next_tx_at {
             next_tx_at = produced + interval_samples;
             seq += 1;
             let text = format!("Test #{seq}");
@@ -525,16 +536,20 @@ async fn sim_loop(shared: Arc<SimShared>) {
                             };
                             push_log_full(&shared, MsgDir::Rx, label,
                                 Some(msg.from), Some(msg.hop_limit), msg.self_origin);
-                            if let Some(fwd_frame) = fwd {
+                            if tx_allowed {
+                                if let Some(fwd_frame) = fwd {
+                                    let iq = tx_modem.modulate(&fwd_frame.to_bytes());
+                                    driver.push_samples(iq);
+                                    push_log(&shared, MsgDir::Fwd, "relay".into());
+                                }
+                            }
+                        }
+                        Ok((None, Some(fwd_frame))) => {
+                            if tx_allowed {
                                 let iq = tx_modem.modulate(&fwd_frame.to_bytes());
                                 driver.push_samples(iq);
                                 push_log(&shared, MsgDir::Fwd, "relay".into());
                             }
-                        }
-                        Ok((None, Some(fwd_frame))) => {
-                            let iq = tx_modem.modulate(&fwd_frame.to_bytes());
-                            driver.push_samples(iq);
-                            push_log(&shared, MsgDir::Fwd, "relay".into());
                         }
                         Ok((None, None)) => {}
                         Err(e) => push_log(&shared, MsgDir::Error, format!("{e}")),
@@ -610,7 +625,7 @@ impl MeshSimApp {
         let init_uhd = shared.use_uhd.load(Ordering::Relaxed);
         if init_uhd {
             shared.auto_tx.store(false, Ordering::Relaxed);
-            *shared.mode.lock().unwrap() = SimMode::Terminal;
+            *shared.mode.lock().unwrap() = SimMode::Listen;
             shared.rebuild_nodes.store(true, Ordering::Relaxed);
         }
         Self {
@@ -631,7 +646,7 @@ impl MeshSimApp {
             uhd_warning:     None,
             auto_tx:         !init_uhd,
             msg_input:       String::new(),
-            mode:            if init_uhd { SimMode::Terminal } else { SimMode::TwoNodeTest },
+            mode:            if init_uhd { SimMode::Listen } else { SimMode::TwoNodeTest },
             node_short:      "TERM".into(),
             node_long:       "Mesh Terminal".into(),
             tx_dest:         BROADCAST,
@@ -727,6 +742,13 @@ impl MeshSimApp {
                 && self.mode != SimMode::Terminal
             {
                 self.mode = SimMode::Terminal;
+                *self.shared.mode.lock().unwrap() = self.mode;
+                self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
+            }
+            if ui.selectable_label(self.mode == SimMode::Listen, "Listen").clicked()
+                && self.mode != SimMode::Listen
+            {
+                self.mode = SimMode::Listen;
                 *self.shared.mode.lock().unwrap() = self.mode;
                 self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
             }
