@@ -595,6 +595,9 @@ impl MeshSimApp {
         waterfall_chart.set_y_time_display(wf_secs);
 
         let init_uhd = shared.use_uhd.load(Ordering::Relaxed);
+        if init_uhd {
+            shared.auto_tx.store(false, Ordering::Relaxed);
+        }
         Self {
             shared,
             sf: DEFAULT_SF,
@@ -610,7 +613,7 @@ impl MeshSimApp {
             uhd_rx_gain_db:  40.0,
             uhd_tx_gain_db:  40.0,
             uhd_warning:     None,
-            auto_tx:         true,
+            auto_tx:         !init_uhd,
             msg_input:       String::new(),
             mode:            SimMode::TwoNodeTest,
             node_short:      "TERM".into(),
