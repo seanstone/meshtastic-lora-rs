@@ -10,85 +10,6 @@ routing, duty-cycle enforcement, protobuf types, and the application interface
 
 ---
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  meshtastic-lora-rs  (this repo)                               │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  app      — MeshNode API, ChannelConfig, MeshMessage    │   │
-│  ├─────────────────────────────────────────────────────────┤   │
-│  │  mesh     — flood router, dedup cache, hop-limit logic  │   │
-│  │             node identity, neighbour table               │   │
-│  ├─────────────────────────────────────────────────────────┤   │
-│  │  mac      — OTA framing, AES-256-CTR, duty-cycle        │   │
-│  ├─────────────────────────────────────────────────────────┤   │
-│  │  proto    — Data, User, PortNum, MeshPacket, FromRadio  │   │
-│  │             ToRadio, ServiceEnvelope (prost types)       │   │
-│  └──────────────────────────┬──────────────────────────────┘   │
-│  serial — Meshtastic serial framing protocol                   │
-│  mqtt   — MQTT bridge (rumqttc, ServiceEnvelope)               │
-│  ws     — WebSocket server (JSON commands/events)              │
-│                              │ lora::modem  lora::channel       │
-└──────────────────────────────┼──────────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────────┐
-│  lora-rs  (submodule — PHY + library API)                      │
-│  lora::modem   — Tx / Rx byte↔IQ wrappers                      │
-│  lora::channel — Driver trait + Channel (AWGN sim)             │
-│  lora::uhd     — UhdDevice (USRP hardware driver)              │
-│  lora::tx / rx — DSP pipeline (whiten/Hamming/chirp/FFT/…)     │
-│  lora::ui      — spectrum / waterfall / SpectrumAnalyzer       │
-│  bin/gui_sim   — standalone LoRa PHY simulator GUI             │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Workspace layout
-
-```
-meshtastic-lora-rs/
-├── lora-rs/                 — PHY submodule (lora crate)
-│   └── src/
-│       ├── modem.rs         — Tx, Rx, DecodeResult
-│       ├── channel.rs       — Driver trait, Channel (AWGN sim)
-│       ├── uhd.rs           — UhdDevice (USRP, feature-gated)
-│       ├── tx/              — DSP encode pipeline
-│       ├── rx/              — DSP decode pipeline
-│       ├── ui/              — spectrum, waterfall, SpectrumAnalyzer
-│       └── bin/gui_sim/     — standalone LoRa GUI simulator
-├── mesh/                    — mesh networking crate
-│   └── src/
-│       ├── lib.rs
-│       ├── mac/
-│       │   ├── packet.rs    — MeshHeader / MeshFrame OTA framing
-│       │   ├── crypto.rs    — AES-256-CTR encrypt / decrypt
-│       │   └── duty_cycle.rs— airtime budget tracker
-│       ├── mesh/
-│       │   ├── router.rs    — stateless flood router + DedupCache
-│       │   └── node.rs      — LocalNode, NodeInfo, NeighbourTable
-│       ├── proto/
-│       │   ├── mod.rs       — re-exports + helper impls
-│       │   └── generated.rs — prost-build output (from protobufs/ submodule)
-│       ├── presets.rs       — ModemPreset + all 9 Meshtastic presets
-│       ├── app.rs           — MeshNode public API
-│       ├── serial.rs        — serial framing (magic + length-prefix)
-│       ├── mqtt.rs          — MQTT bridge (rumqttc, ServiceEnvelope)
-│       ├── ws.rs            — WebSocket server (tokio-tungstenite, JSON)
-│       └── bin/
-│           ├── mesh_radio.rs  — two-node egui simulation (spectrum + waterfall)
-│           └── mesh_node.rs — headless node (text / serial / MQTT)
-├── protobufs/               — meshtastic/protobufs submodule (.proto files)
-├── web/                     — WASM build assets
-│   └── index.html
-├── Makefile
-└── Cargo.toml               — workspace root
-```
-
----
-
 ## Usage
 
 ### GUI simulation
@@ -173,6 +94,85 @@ See [docs/examples.md](docs/examples.md) for detailed walkthroughs:
 - Building a Home Assistant alert bridge
 - Monitoring a mesh network from a web dashboard
 - Setting up a USRP SDR gateway
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  meshtastic-lora-rs  (this repo)                               │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  app      — MeshNode API, ChannelConfig, MeshMessage    │   │
+│  ├─────────────────────────────────────────────────────────┤   │
+│  │  mesh     — flood router, dedup cache, hop-limit logic  │   │
+│  │             node identity, neighbour table               │   │
+│  ├─────────────────────────────────────────────────────────┤   │
+│  │  mac      — OTA framing, AES-256-CTR, duty-cycle        │   │
+│  ├─────────────────────────────────────────────────────────┤   │
+│  │  proto    — Data, User, PortNum, MeshPacket, FromRadio  │   │
+│  │             ToRadio, ServiceEnvelope (prost types)       │   │
+│  └──────────────────────────┬──────────────────────────────┘   │
+│  serial — Meshtastic serial framing protocol                   │
+│  mqtt   — MQTT bridge (rumqttc, ServiceEnvelope)               │
+│  ws     — WebSocket server (JSON commands/events)              │
+│                              │ lora::modem  lora::channel       │
+└──────────────────────────────┼──────────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────────┐
+│  lora-rs  (submodule — PHY + library API)                      │
+│  lora::modem   — Tx / Rx byte↔IQ wrappers                      │
+│  lora::channel — Driver trait + Channel (AWGN sim)             │
+│  lora::uhd     — UhdDevice (USRP hardware driver)              │
+│  lora::tx / rx — DSP pipeline (whiten/Hamming/chirp/FFT/…)     │
+│  lora::ui      — spectrum / waterfall / SpectrumAnalyzer       │
+│  bin/gui_sim   — standalone LoRa PHY simulator GUI             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Workspace layout
+
+```
+meshtastic-lora-rs/
+├── lora-rs/                 — PHY submodule (lora crate)
+│   └── src/
+│       ├── modem.rs         — Tx, Rx, DecodeResult
+│       ├── channel.rs       — Driver trait, Channel (AWGN sim)
+│       ├── uhd.rs           — UhdDevice (USRP, feature-gated)
+│       ├── tx/              — DSP encode pipeline
+│       ├── rx/              — DSP decode pipeline
+│       ├── ui/              — spectrum, waterfall, SpectrumAnalyzer
+│       └── bin/gui_sim/     — standalone LoRa GUI simulator
+├── mesh/                    — mesh networking crate
+│   └── src/
+│       ├── lib.rs
+│       ├── mac/
+│       │   ├── packet.rs    — MeshHeader / MeshFrame OTA framing
+│       │   ├── crypto.rs    — AES-256-CTR encrypt / decrypt
+│       │   └── duty_cycle.rs— airtime budget tracker
+│       ├── mesh/
+│       │   ├── router.rs    — stateless flood router + DedupCache
+│       │   └── node.rs      — LocalNode, NodeInfo, NeighbourTable
+│       ├── proto/
+│       │   ├── mod.rs       — re-exports + helper impls
+│       │   └── generated.rs — prost-build output (from protobufs/ submodule)
+│       ├── presets.rs       — ModemPreset + all 9 Meshtastic presets
+│       ├── app.rs           — MeshNode public API
+│       ├── serial.rs        — serial framing (magic + length-prefix)
+│       ├── mqtt.rs          — MQTT bridge (rumqttc, ServiceEnvelope)
+│       ├── ws.rs            — WebSocket server (tokio-tungstenite, JSON)
+│       └── bin/
+│           ├── mesh_radio.rs  — egui GUI (spectrum + waterfall + mesh)
+│           └── mesh_node.rs — headless node (text / serial / MQTT)
+├── protobufs/               — meshtastic/protobufs submodule (.proto files)
+├── web/                     — WASM build assets
+│   └── index.html
+├── Makefile
+└── Cargo.toml               — workspace root
+```
 
 ---
 
