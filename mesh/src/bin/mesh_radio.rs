@@ -272,6 +272,10 @@ async fn sim_loop(shared: Arc<SimShared>) {
     let mut nodes = build_nodes(mode, &shared);
 
     let mut driver: Box<dyn Driver> = make_driver(&shared);
+    shared.uhd_loading.store(false, Ordering::Relaxed);
+    // Initial make_driver already opened the device; clear the rebuild flag
+    // so we don't redundantly reopen.
+    shared.rebuild_driver.store(false, Ordering::Relaxed);
     let mut analyzer = SpectrumAnalyzer::new(FFT_SIZE);
 
     let mut tx_modem = Tx::new(DEFAULT_SF, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
@@ -1485,6 +1489,7 @@ fn main() -> eframe::Result<()> {
         if lora::uhd::probe() {
             eprintln!("found — switching to UHD mode");
             shared.use_uhd.store(true, Ordering::Relaxed);
+            shared.uhd_loading.store(true, Ordering::Relaxed);
             shared.rebuild_driver.store(true, Ordering::Relaxed);
         } else {
             eprintln!("none found — using simulator");
