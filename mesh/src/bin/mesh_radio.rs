@@ -1172,8 +1172,8 @@ impl MeshSimApp {
                         self.msg_drawer_open = !self.msg_drawer_open;
                     }
 
-                    // GitHub icon.
-                    ui.hyperlink_to(GITHUB_ICON.to_string(), REPO_URL);
+                    // GitHub icon — pad so the glyph isn't clipped.
+                    ui.hyperlink_to(format!(" {GITHUB_ICON} "), REPO_URL);
 
                     // Driver indicator.
                     let drv = if self.use_uhd { "UHD" } else { "Sim" };
