@@ -598,6 +598,8 @@ impl MeshSimApp {
         let init_uhd = shared.use_uhd.load(Ordering::Relaxed);
         if init_uhd {
             shared.auto_tx.store(false, Ordering::Relaxed);
+            *shared.mode.lock().unwrap() = SimMode::Terminal;
+            shared.rebuild_nodes.store(true, Ordering::Relaxed);
         }
         Self {
             shared,
@@ -617,7 +619,7 @@ impl MeshSimApp {
             uhd_warning:     None,
             auto_tx:         !init_uhd,
             msg_input:       String::new(),
-            mode:            SimMode::TwoNodeTest,
+            mode:            if init_uhd { SimMode::Terminal } else { SimMode::TwoNodeTest },
             node_short:      "TERM".into(),
             node_long:       "Mesh Terminal".into(),
             tx_dest:         BROADCAST,
