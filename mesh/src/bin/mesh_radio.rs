@@ -180,13 +180,14 @@ fn db_to_amp(db: f32) -> f32 { 10_f32.powf(db / 20.0) }
 fn now_hms() -> String {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-        // UTC HH:MM:SS — avoids a chrono dependency.
-        let h = (t / 3600) % 24;
-        let m = (t / 60) % 60;
-        let s = t % 60;
-        format!("{h:02}:{m:02}:{s:02}")
+        #[repr(C)]
+        struct Tm { sec: i32, min: i32, hour: i32, _rest: [i32; 6] }
+        unsafe extern "C" { safe fn localtime_r(t: *const i64, result: *mut Tm) -> *mut Tm; }
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let mut tm = Tm { sec: 0, min: 0, hour: 0, _rest: [0; 6] };
+        unsafe { localtime_r(&epoch, &mut tm) };
+        format!("{:02}:{:02}:{:02}", tm.hour, tm.min, tm.sec)
     }
     #[cfg(target_arch = "wasm32")]
     {
