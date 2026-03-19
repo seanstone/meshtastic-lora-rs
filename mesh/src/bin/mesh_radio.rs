@@ -1081,6 +1081,18 @@ impl eframe::App for MeshSimApp {
             self.show_qr = open;
         }
 
+        // Update x-axis: show MHz when UHD active, bin indices otherwise.
+        if self.use_uhd {
+            let center_hz = self.uhd_freq_mhz * 1e6;
+            let bw_hz     = PRESETS[self.preset_idx].bw_khz as f64 * 1000.0;
+            let fft       = FFT_SIZE;
+            self.spectrum_chart .set_x_freq_display(center_hz, bw_hz, fft);
+            self.waterfall_chart.set_x_freq_display(center_hz, bw_hz, fft);
+        } else {
+            self.spectrum_chart .clear_x_freq_display();
+            self.waterfall_chart.clear_x_freq_display();
+        }
+
         let screen_w = ctx.input(|i| i.screen_rect().width());
         let is_mobile = screen_w < MOBILE_BREAKPOINT;
 
