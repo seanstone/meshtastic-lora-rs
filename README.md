@@ -248,3 +248,13 @@ See [CHANGES.md](CHANGES.md) for completed work.
 | `lora`   | PHY TX / RX pipeline (submod)  |
 
 No C dependencies in the `mesh` crate (UHD links libuhd via lora).
+
+---
+
+## Issues
+
+* DC spike (use IF?)
+* A top banner saying "Simulation"
+* Set "Auto TX" to off in sim
+* Fix zoom scale for web
+* Resume from pause in UHD mode
