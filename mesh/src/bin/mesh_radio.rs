@@ -581,6 +581,9 @@ async fn sim_loop(shared: Arc<SimShared>) {
                         format!("CRC fail (hdr: len={payload_len} cr=4/{} crc={}) [{off_hz:+.0}Hz]",
                             cr + 4, if has_crc { "yes" } else { "no" }));
                 }
+                StreamDecodeResult::DecodeFailed { consumed } => {
+                    rx_buffer.drain(..consumed);
+                }
                 StreamDecodeResult::None => break,
             }
         }
