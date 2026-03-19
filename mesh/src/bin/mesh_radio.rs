@@ -24,7 +24,7 @@ use lora::uhd::UhdDevice;
 use mesh::{
     app::{ChannelConfig, MeshNode},
     mac::packet::BROADCAST,
-    presets::{PRESETS, ModemPreset},
+    presets::{PRESETS, REGIONS, DEFAULT_REGION_IDX, ModemPreset, Region},
 };
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -147,7 +147,7 @@ impl SimShared {
             waterfall_plot,
             use_uhd:        AtomicBool::new(false),
             uhd_args:       Mutex::new(String::new()),
-            uhd_freq_hz:    Mutex::new(915e6),
+            uhd_freq_hz:    Mutex::new(REGIONS[DEFAULT_REGION_IDX].channel_freq(PRESETS[DEFAULT_PRESET_IDX].bw_khz) * 1e6),
             uhd_rx_gain_db: Mutex::new(40.0),
             uhd_tx_gain_db: Mutex::new(40.0),
             rebuild_driver: AtomicBool::new(false),
@@ -553,6 +553,7 @@ struct MeshSimApp {
     noise_db:        f32,
     interval_ms:     u64,
     preset_idx:      usize,
+    region_idx:      usize,
     spectrum_chart:  Chart,
     waterfall_chart: Chart,
     use_uhd:         bool,
@@ -605,11 +606,12 @@ impl MeshSimApp {
             noise_db: DEFAULT_NOISE_DB,
             interval_ms: DEFAULT_INTERVAL_MS,
             preset_idx: DEFAULT_PRESET_IDX,
+            region_idx: DEFAULT_REGION_IDX,
             spectrum_chart,
             waterfall_chart,
             use_uhd:        init_uhd,
             uhd_args:        String::new(),
-            uhd_freq_mhz:   915.0,
+            uhd_freq_mhz:   REGIONS[DEFAULT_REGION_IDX].channel_freq(PRESETS[DEFAULT_PRESET_IDX].bw_khz),
             uhd_rx_gain_db:  40.0,
             uhd_tx_gain_db:  40.0,
             uhd_warning:     None,
@@ -630,10 +632,15 @@ impl MeshSimApp {
     fn apply_preset(&mut self, p: &ModemPreset) {
         self.sf = p.sf;
         *self.shared.sf.lock().unwrap() = p.sf;
+        // Recalculate frequency — channel centre depends on BW.
+        let r = &REGIONS[self.region_idx];
+        self.uhd_freq_mhz = r.channel_freq(p.bw_khz);
+        *self.shared.uhd_freq_hz.lock().unwrap() = self.uhd_freq_mhz * 1e6;
     }
 
     fn restore_defaults(&mut self) {
         self.preset_idx  = DEFAULT_PRESET_IDX;
+        self.region_idx  = DEFAULT_REGION_IDX;
         self.sf          = DEFAULT_SF;
         self.signal_db   = DEFAULT_SIGNAL_DB;
         self.noise_db    = DEFAULT_NOISE_DB;
@@ -722,6 +729,29 @@ impl MeshSimApp {
                     }
                 }
             });
+    }
+
+    fn ui_region_selector(&mut self, ui: &mut egui::Ui) {
+        egui::ComboBox::from_id_salt("region")
+            .selected_text(REGIONS[self.region_idx].name)
+            .show_ui(ui, |ui| {
+                for (i, r) in REGIONS.iter().enumerate() {
+                    let label = format!("{} ({:.1} MHz)", r.name, r.freq_start);
+                    if ui.selectable_label(self.region_idx == i, label).clicked() {
+                        self.region_idx = i;
+                        self.apply_region(r);
+                    }
+                }
+            });
+    }
+
+    fn apply_region(&mut self, r: &Region) {
+        let bw = PRESETS[self.preset_idx].bw_khz;
+        self.uhd_freq_mhz = r.channel_freq(bw);
+        *self.shared.uhd_freq_hz.lock().unwrap() = self.uhd_freq_mhz * 1e6;
+        if self.use_uhd {
+            self.trigger_rebuild();
+        }
     }
 
     fn ui_sf_slider(&mut self, ui: &mut egui::Ui) {
@@ -1065,8 +1095,13 @@ impl MeshSimApp {
             ui.heading("Settings");
             self.ui_mode_selector(ui);
             ui.separator();
+            ui.label("Region");
+            self.ui_region_selector(ui);
+            ui.add_space(4.0);
             ui.label("Preset");
             self.ui_preset_selector(ui);
+            ui.add_space(4.0);
+            ui.label(format!("Freq  {:.3} MHz", self.uhd_freq_mhz));
             ui.add_space(4.0);
             self.ui_sf_slider(ui);
             ui.add_space(4.0);
@@ -1198,9 +1233,19 @@ impl MeshSimApp {
                             self.ui_mode_selector(ui);
                             ui.end_row();
 
+                            // Region.
+                            ui.label("Region");
+                            self.ui_region_selector(ui);
+                            ui.end_row();
+
                             // Preset.
                             ui.label("Preset");
                             self.ui_preset_selector(ui);
+                            ui.end_row();
+
+                            // Freq.
+                            ui.label("Freq");
+                            ui.label(format!("{:.3} MHz", self.uhd_freq_mhz));
                             ui.end_row();
 
                             // SF.
