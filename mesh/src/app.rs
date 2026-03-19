@@ -64,6 +64,8 @@ pub struct MeshMessage {
     pub data: Data,
     /// Number of hops remaining when received (informational).
     pub hop_limit: u8,
+    /// True if the packet originated from this node (TX loopback).
+    pub self_origin: bool,
 }
 
 // ── MeshNode ──────────────────────────────────────────────────────────────
@@ -193,22 +195,29 @@ impl MeshNode {
         }
 
         let plaintext = self.crypto.decrypt(h.id, h.from, &frame.payload);
+        let is_self = h.from == self.local.node_id;
 
         let decision = route(&frame, self.local.node_id, plaintext, &mut self.dedup);
 
         match decision {
             RouteDecision::Drop => Ok((None, None)),
 
+            RouteDecision::Forward { .. } if is_self => Ok((None, None)),
+
             RouteDecision::Forward { frame: fwd } => Ok((None, Some(fwd))),
 
             RouteDecision::Deliver { plaintext } => {
-                let msg = self.decode_payload(h.to, h.from, h.hop_limit, &plaintext)?;
+                let mut msg = self.decode_payload(h.to, h.from, h.hop_limit, &plaintext)?;
+                msg.self_origin = is_self;
                 Ok((Some(msg), None))
             }
 
             RouteDecision::DeliverAndForward { plaintext, frame: fwd } => {
-                let msg = self.decode_payload(h.to, h.from, h.hop_limit, &plaintext)?;
-                Ok((Some(msg), Some(fwd)))
+                let mut msg = self.decode_payload(h.to, h.from, h.hop_limit, &plaintext)?;
+                msg.self_origin = is_self;
+                // Don't forward our own packets.
+                let fwd = if is_self { None } else { Some(fwd) };
+                Ok((Some(msg), fwd))
             }
         }
     }
@@ -236,7 +245,7 @@ impl MeshNode {
             }
         }
 
-        Ok(MeshMessage { from, to, data, hop_limit })
+        Ok(MeshMessage { from, to, data, hop_limit, self_origin: false })
     }
 }
 

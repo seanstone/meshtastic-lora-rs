@@ -84,6 +84,7 @@ struct LogEntry {
     text:     String,
     from_id:  Option<u32>,
     hops:     Option<u8>,
+    self_origin: bool,
 }
 
 struct SimShared {
@@ -186,12 +187,16 @@ fn now_hms() -> String {
 }
 
 fn push_log(shared: &SimShared, dir: MsgDir, text: String) {
-    push_log_ex(shared, dir, text, None, None);
+    push_log_full(shared, dir, text, None, None, false);
 }
 
 fn push_log_ex(shared: &SimShared, dir: MsgDir, text: String, from_id: Option<u32>, hops: Option<u8>) {
+    push_log_full(shared, dir, text, from_id, hops, false);
+}
+
+fn push_log_full(shared: &SimShared, dir: MsgDir, text: String, from_id: Option<u32>, hops: Option<u8>, self_origin: bool) {
     let mut log = shared.log.lock().unwrap();
-    log.push_back(LogEntry { time: now_hms(), dir, text, from_id, hops });
+    log.push_back(LogEntry { time: now_hms(), dir, text, from_id, hops, self_origin });
     if log.len() > MAX_LOG { log.pop_front(); }
 }
 
@@ -510,14 +515,16 @@ async fn sim_loop(shared: Arc<SimShared>) {
                     rx_buffer.drain(..consumed);
                     match nodes.rx_node_mut().process_rx_frame(&payload) {
                         Ok((Some(msg), fwd)) => {
-                            shared.rx_count.fetch_add(1, Ordering::Relaxed);
+                            if !msg.self_origin {
+                                shared.rx_count.fetch_add(1, Ordering::Relaxed);
+                            }
                             let label = if let Some(t) = msg.data.text() {
                                 format!("\"{}\"", t)
                             } else {
                                 format!("portnum={} len={}", msg.data.portnum, msg.data.payload.len())
                             };
-                            push_log_ex(&shared, MsgDir::Rx, label,
-                                Some(msg.from), Some(msg.hop_limit));
+                            push_log_full(&shared, MsgDir::Rx, label,
+                                Some(msg.from), Some(msg.hop_limit), msg.self_origin);
                             if let Some(fwd_frame) = fwd {
                                 let iq = tx_modem.modulate(&fwd_frame.to_bytes());
                                 driver.push_samples(iq);
@@ -1008,12 +1015,20 @@ impl MeshSimApp {
             .show(ui, |ui| {
                 let log = self.shared.log.lock().unwrap();
                 for entry in log.iter() {
-                    let (prefix, color) = match entry.dir {
-                        MsgDir::Tx     => ("TX ", Color32::from_rgb(100, 180, 255)),
-                        MsgDir::Rx     => ("RX ", Color32::from_rgb(100, 220, 100)),
-                        MsgDir::Fwd    => ("FWD", Color32::from_rgb(255, 200, 80)),
-                        MsgDir::System => ("SYS", Color32::from_rgb(180, 180, 180)),
-                        MsgDir::Error  => ("ERR", Color32::from_rgb(220, 100, 100)),
+                    let (prefix, color) = if entry.self_origin {
+                        (match entry.dir {
+                            MsgDir::Tx => "TX ",  MsgDir::Rx => "RX ",
+                            MsgDir::Fwd => "FWD", MsgDir::System => "SYS",
+                            MsgDir::Error => "ERR",
+                        }, Color32::from_rgb(90, 90, 90))
+                    } else {
+                        match entry.dir {
+                            MsgDir::Tx     => ("TX ", Color32::from_rgb(100, 180, 255)),
+                            MsgDir::Rx     => ("RX ", Color32::from_rgb(100, 220, 100)),
+                            MsgDir::Fwd    => ("FWD", Color32::from_rgb(255, 200, 80)),
+                            MsgDir::System => ("SYS", Color32::from_rgb(180, 180, 180)),
+                            MsgDir::Error  => ("ERR", Color32::from_rgb(220, 100, 100)),
+                        }
                     };
                     let mut line = format!("[{}] {}", entry.time, prefix);
                     if let Some(id) = entry.from_id {
