@@ -46,6 +46,78 @@ const DEFAULT_INTERVAL_MS: u64 = 2000;
 const DEFAULT_PRESET_IDX: usize = 5;
 const MOBILE_BREAKPOINT: f32 = 600.0;
 
+// ── GitHub icon ─────────────────────────────────────────────────────────────
+
+/// Paint the GitHub Invertocat mark at the given size and return a clickable Response.
+/// The icon is drawn using the official SVG path approximated as line segments.
+fn github_link(ui: &mut egui::Ui, url: &str, size: f32) -> egui::Response {
+    let (resp, painter) = ui.allocate_painter(egui::vec2(size, size), egui::Sense::click());
+    let rect = resp.rect;
+    let c = rect.center();
+    let r = size * 0.48;
+
+    // Colour: dim when idle, bright on hover.
+    let color = if resp.hovered() {
+        Color32::from_gray(220)
+    } else {
+        Color32::from_gray(160)
+    };
+
+    // Outer circle.
+    painter.circle_filled(c, r, color);
+
+    // "Negative space" cat head — approximated with simple shapes:
+    // Two ears (triangles), face (circle), chin (small ellipse).
+    let bg = Color32::from_gray(30); // matches dark panel background
+
+    // Face circle (slightly above centre).
+    let face_c = c + egui::vec2(0.0, size * 0.02);
+    painter.circle_filled(face_c, r * 0.58, bg);
+
+    // Left ear.
+    let ear_pts = |dx: f32| -> Vec<egui::Pos2> {
+        vec![
+            c + egui::vec2(dx * 0.18 * size, -0.28 * size),
+            c + egui::vec2(dx * 0.40 * size, -0.40 * size),
+            c + egui::vec2(dx * 0.42 * size, -0.16 * size),
+        ]
+    };
+    painter.add(egui::Shape::convex_polygon(ear_pts(-1.0), bg, egui::Stroke::NONE));
+    painter.add(egui::Shape::convex_polygon(ear_pts(1.0), bg, egui::Stroke::NONE));
+
+    // Inner face features: two eyes and a nose.
+    let eye_r = size * 0.05;
+    let eye_y = c.y - size * 0.04;
+    painter.circle_filled(egui::pos2(c.x - size * 0.13, eye_y), eye_r, color);
+    painter.circle_filled(egui::pos2(c.x + size * 0.13, eye_y), eye_r, color);
+    // Nose (tiny).
+    let nose_r = size * 0.025;
+    painter.circle_filled(egui::pos2(c.x, c.y + size * 0.06), nose_r, color);
+
+    // Chin / lower body bump.
+    let chin_c = c + egui::vec2(0.0, size * 0.26);
+    painter.circle_filled(chin_c, r * 0.30, bg);
+
+    // Tail (small arc on the right).
+    let tail_pts = vec![
+        c + egui::vec2(size * 0.20, size * 0.30),
+        c + egui::vec2(size * 0.34, size * 0.24),
+        c + egui::vec2(size * 0.36, size * 0.36),
+        c + egui::vec2(size * 0.24, size * 0.38),
+    ];
+    painter.add(egui::Shape::convex_polygon(tail_pts, bg, egui::Stroke::NONE));
+
+    // Pointer cursor on hover.
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if resp.clicked() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+    }
+
+    resp
+}
+
 // ── Operating mode ──────────────────────────────────────────────────────────
 
 /// Simulation mode.
@@ -1023,9 +1095,8 @@ impl MeshSimApp {
             ui.add_space(8.0);
             ui.separator();
             ui.horizontal(|ui| {
-                ui.hyperlink_to("GitHub", "https://github.com/seanstone/meshtastic-lora-rs");
-                ui.label("·");
-                ui.hyperlink_to("lora-rs", "https://github.com/seanstone/lora-rs");
+                github_link(ui, "https://github.com/seanstone/meshtastic-lora-rs", 20.0);
+                ui.hyperlink_to("meshtastic-lora-rs", "https://github.com/seanstone/meshtastic-lora-rs");
             });
         });
 
@@ -1106,8 +1177,8 @@ impl MeshSimApp {
                         self.msg_drawer_open = !self.msg_drawer_open;
                     }
 
-                    // GitHub link.
-                    ui.hyperlink_to("GH", "https://github.com/seanstone/meshtastic-lora-rs");
+                    // GitHub icon.
+                    github_link(ui, "https://github.com/seanstone/meshtastic-lora-rs", 16.0);
 
                     // Driver indicator.
                     let drv = if self.use_uhd { "UHD" } else { "Sim" };
