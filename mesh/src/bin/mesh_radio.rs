@@ -16,7 +16,7 @@ use std::{
 use eframe::egui::{self, Color32, RichText, ScrollArea};
 use rustfft::num_complex::Complex;
 use lora::channel::{Channel, Driver};
-use lora::modem::{Tx, Rx};
+use lora::modem::{Tx, Rx, StreamDecodeResult};
 use lora::ui::{Chart, SpectrumPlot, WaterfallPlot, SpectrumAnalyzer};
 #[cfg(feature = "uhd")]
 use lora::uhd::UhdDevice;
@@ -533,7 +533,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
 
         loop {
             match rx_modem.decode_streaming(&rx_buffer) {
-                Some((payload, consumed)) => {
+                StreamDecodeResult::Ok { payload, consumed } => {
                     rx_buffer.drain(..consumed);
                     match nodes.rx_node_mut().process_rx_frame(&payload) {
                         Ok((Some(msg), fwd)) => {
@@ -566,7 +566,13 @@ async fn sim_loop(shared: Arc<SimShared>) {
                         Err(e) => push_log(&shared, MsgDir::Error, format!("{e}")),
                     }
                 }
-                None => break,
+                StreamDecodeResult::CrcFail { payload_len, cr, has_crc, consumed } => {
+                    rx_buffer.drain(..consumed);
+                    push_log(&shared, MsgDir::Error,
+                        format!("CRC fail (hdr: len={payload_len} cr=4/{} crc={})",
+                            cr + 4, if has_crc { "yes" } else { "no" }));
+                }
+                StreamDecodeResult::None => break,
             }
         }
 
