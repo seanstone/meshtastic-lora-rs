@@ -298,7 +298,11 @@ async fn sim_loop(shared: Arc<SimShared>) {
     let mut analyzer = SpectrumAnalyzer::new(FFT_SIZE);
 
     let mut tx_modem = Tx::new(DEFAULT_SF, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-    let mut rx_modem = Rx::new(DEFAULT_SF, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let bw_hz = SR_HZ as f64 / OS_FACTOR as f64;
+    let mut rx_modem = Rx::new_with_freq(
+        DEFAULT_SF, CR, OS_FACTOR, SYNC_WORD, PREAMBLE,
+        *shared.uhd_freq_hz.lock().unwrap(), bw_hz,
+    );
     let mut cur_sf: u8 = DEFAULT_SF;
 
     let mut rx_buffer: Vec<Complex<f32>> = Vec::new();
@@ -433,10 +437,15 @@ async fn sim_loop(shared: Arc<SimShared>) {
         if sf != cur_sf {
             cur_sf = sf;
             tx_modem = Tx::new(sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-            rx_modem = Rx::new(sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+            rx_modem = Rx::new_with_freq(
+                sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE,
+                *shared.uhd_freq_hz.lock().unwrap(), bw_hz,
+            );
             rx_buffer.clear();
             driver.clear();
         }
+        // Keep center freq in sync with runtime changes.
+        rx_modem.center_freq_hz = *shared.uhd_freq_hz.lock().unwrap();
 
         let cur_mode = *shared.mode.lock().unwrap();
         let tx_allowed = cur_mode != SimMode::Listen;
@@ -583,6 +592,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
                 }
                 StreamDecodeResult::DecodeFailed { consumed } => {
                     rx_buffer.drain(..consumed);
+                    push_log(&shared, MsgDir::Error, "decode failed (header)".into());
                 }
                 StreamDecodeResult::None => break,
             }

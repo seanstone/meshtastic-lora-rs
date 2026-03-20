@@ -33,7 +33,7 @@ use std::{
 
 use prost::Message as _;
 use lora::channel::{Channel, Driver};
-use lora::modem::{Tx, Rx};
+use lora::modem::{Tx, Rx, StreamDecodeResult};
 use rustfft::num_complex::Complex;
 #[cfg(feature = "uhd")]
 use lora::uhd::UhdDevice;
@@ -347,14 +347,18 @@ fn tick_phy(
     let mut results = Vec::new();
     loop {
         match rx_modem.decode_streaming(&state.rx_buffer) {
-            Some((payload, consumed)) => {
+            StreamDecodeResult::Ok { payload, consumed, .. } => {
                 state.rx_buffer.drain(..consumed);
                 match node.process_rx_frame(&payload) {
                     Ok(pair) => results.push(pair),
                     Err(e)   => eprintln!("[err] {e}"),
                 }
             }
-            None => break,
+            StreamDecodeResult::CrcFail { consumed, .. } |
+            StreamDecodeResult::DecodeFailed { consumed } => {
+                state.rx_buffer.drain(..consumed);
+            }
+            StreamDecodeResult::None => break,
         }
     }
     results
@@ -398,7 +402,10 @@ fn run_text_mode_sync(cfg: Config) {
 
     let mut driver = make_driver(&cfg);
     let tx_modem = Tx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-    let rx_modem = Rx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let rx_modem = Rx::new_with_freq(
+        cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE,
+        cfg.uhd_freq_mhz * 1e6, SR_HZ as f64 / OS_FACTOR as f64,
+    );
     let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
 
     let mut phy = PhyState::new();
@@ -464,7 +471,10 @@ async fn run_text_mode_async(cfg: Config) {
 
     let mut driver = make_driver(&cfg);
     let tx_modem = Tx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-    let rx_modem = Rx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let rx_modem = Rx::new_with_freq(
+        cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE,
+        cfg.uhd_freq_mhz * 1e6, SR_HZ as f64 / OS_FACTOR as f64,
+    );
     let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
 
     let mut phy = PhyState::new();
@@ -548,7 +558,10 @@ fn run_serial_mode(cfg: Config) {
 
     let mut driver = make_driver(&cfg);
     let tx_modem = Tx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-    let rx_modem = Rx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+    let rx_modem = Rx::new_with_freq(
+        cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE,
+        cfg.uhd_freq_mhz * 1e6, SR_HZ as f64 / OS_FACTOR as f64,
+    );
     let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
 
     let mut phy = PhyState::new();
@@ -651,7 +664,10 @@ fn run_mqtt_mode(cfg: Config) {
 
         let mut driver = make_driver(&cfg);
         let tx_modem = Tx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
-        let rx_modem = Rx::new(cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE);
+        let rx_modem = Rx::new_with_freq(
+            cfg.sf, CR, OS_FACTOR, SYNC_WORD, PREAMBLE,
+            cfg.uhd_freq_mhz * 1e6, SR_HZ as f64 / OS_FACTOR as f64,
+        );
         let samples_per_tick = (SR_HZ as f64 * TICK.as_secs_f64()).round() as usize;
         let mut phy = PhyState::new();
 
