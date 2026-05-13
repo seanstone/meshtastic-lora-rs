@@ -47,6 +47,13 @@ pub struct Snapshot {
     pub uhd_warning:    Option<String>,
     pub auto_tx:        bool,
     pub tx_dest:        u32,
+
+    /// FFT-peak spectrum: dB value per bin; bin index is array position.
+    /// `Vec<f32>` keeps the wire compact (~16 KB JSON per array vs ~30 KB
+    /// for `[bin, value]` pairs). Empty before the first FFT.
+    pub spectrum: Vec<f32>,
+    /// One waterfall row, same shape as `spectrum`. Sent once per snapshot.
+    pub waterfall_row: Vec<f32>,
 }
 
 impl Snapshot {
@@ -74,6 +81,8 @@ impl Snapshot {
             uhd_warning:    vm.uhd_warning.lock().unwrap().clone(),
             auto_tx:        vm.auto_tx.load(Ordering::Relaxed),
             tx_dest:        *vm.tx_dest.lock().unwrap(),
+            spectrum:       vm.latest_spectrum.lock().unwrap().clone(),
+            waterfall_row:  vm.latest_waterfall_row.lock().unwrap().clone(),
         }
     }
 
@@ -101,5 +110,19 @@ impl Snapshot {
         *vm.uhd_warning.lock().unwrap() = self.uhd_warning.clone();
         vm.auto_tx.store(self.auto_tx, Ordering::Relaxed);
         *vm.tx_dest.lock().unwrap() = self.tx_dest;
+
+        // Spectrum + waterfall: reconstruct `[bin, dB]` pairs and push
+        // through the same `update` API the desktop radio loop uses, so the
+        // local plots scroll just like they would in-process.
+        if !self.spectrum.is_empty() {
+            let pairs: Vec<[f64; 2]> = self.spectrum.iter().enumerate()
+                .map(|(i, &v)| [i as f64, v as f64]).collect();
+            vm.spectrum_plot.update(pairs);
+        }
+        if !self.waterfall_row.is_empty() {
+            let pairs: Vec<[f64; 2]> = self.waterfall_row.iter().enumerate()
+                .map(|(i, &v)| [i as f64, v as f64]).collect();
+            vm.waterfall_plot.update(pairs);
+        }
     }
 }

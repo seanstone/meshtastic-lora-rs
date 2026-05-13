@@ -347,6 +347,9 @@ pub async fn sim_loop(shared: Arc<ViewModel>, mut cmd_rx: UnboundedReceiver<Comm
         for chunk in mixed.chunks(FFT_SIZE) {
             if chunk.len() == FFT_SIZE {
                 let spec = analyzer.compute(chunk);
+                // Cache the dB row for the next WS snapshot.
+                *shared.latest_waterfall_row.lock().unwrap() =
+                    spec.iter().map(|p| p[1] as f32).collect();
                 shared.waterfall_plot.update(spec.clone());
                 if peak.is_empty() {
                     peak = spec;
@@ -358,6 +361,8 @@ pub async fn sim_loop(shared: Arc<ViewModel>, mut cmd_rx: UnboundedReceiver<Comm
             }
         }
         if !peak.is_empty() {
+            *shared.latest_spectrum.lock().unwrap() =
+                peak.iter().map(|p| p[1] as f32).collect();
             shared.spectrum_plot.update(peak);
         }
 

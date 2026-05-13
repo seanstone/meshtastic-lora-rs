@@ -159,6 +159,14 @@ pub struct ViewModel {
     pub spectrum_plot:  Arc<SpectrumPlot>,
     pub waterfall_plot: Arc<WaterfallPlot>,
 
+    /// Latest FFT-peak spectrum (just the dB values; bin index is the array
+    /// position). Mirrored over WS so web clients can render the same plots.
+    pub latest_spectrum: Mutex<Vec<f32>>,
+    /// Latest waterfall row to be appended (same shape as `latest_spectrum`).
+    /// The wire protocol carries one row per snapshot — the web waterfall
+    /// scrolls at the snapshot rate (~10 Hz), not the radio's FFT rate.
+    pub latest_waterfall_row: Mutex<Vec<f32>>,
+
     pub use_uhd:        AtomicBool,
     pub uhd_args:       Mutex<String>,
     pub uhd_freq_hz:    Mutex<f64>,
@@ -200,6 +208,8 @@ impl ViewModel {
             rx_count:     AtomicU64::new(0),
             spectrum_plot,
             waterfall_plot,
+            latest_spectrum: Mutex::new(Vec::new()),
+            latest_waterfall_row: Mutex::new(Vec::new()),
             use_uhd:        AtomicBool::new(false),
             uhd_args:       Mutex::new(String::new()),
             uhd_freq_hz:    Mutex::new(REGIONS[DEFAULT_REGION_IDX].channel_freq(PRESETS[DEFAULT_PRESET_IDX].bw_khz) * 1e6),
