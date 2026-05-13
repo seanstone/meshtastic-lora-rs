@@ -14,11 +14,15 @@ mqtt    = ["dep:rumqttc"]
 # Legacy WebSocket server for external-tool integration (used by mesh_node --ws).
 # Superseded by `server` for the new `mesh` binary; kept until mesh_node retires.
 ws      = ["dep:tokio-tungstenite", "dep:futures-util", "dep:serde_json"]
+# Wasm web GUI feature pulls in futures-util + gloo-net (WebSocket client).
 # axum-based HTTP+WS server hosted by the combined `mesh` binary.
-server  = ["dep:axum", "dep:serde_json", "dep:tokio-stream"]
+server  = ["dep:axum", "dep:serde_json", "dep:tokio-stream", "dep:tower-http"]
 # WebAssembly build — uses gloo-timers and wasm-bindgen entry point.
 wasm    = [
     "dep:gloo-timers",
+    "dep:gloo-net",
+    "dep:futures-util",
+    "dep:serde_json",
     "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",
     "dep:js-sys",
@@ -55,7 +59,7 @@ rumqttc = { version = "0.24", optional = true }
 
 # Legacy WebSocket server (used by mesh_node --ws).
 tokio-tungstenite = { version = "0.24", optional = true }
-futures-util      = { version = "0.3", optional = true }
+futures-util      = { version = "0.3", optional = true, features = ["sink"] }
 
 # Serde derives are always on — the Command enum needs Deserialize for the
 # server feature and Serialize-on-wire ergonomics; serde_json is only pulled
@@ -66,14 +70,16 @@ serde_json = { version = "1", optional = true }
 # HTTP+WS server (server feature only).
 axum         = { version = "0.7", default-features = false, features = ["http1", "ws", "tokio"], optional = true }
 tokio-stream = { version = "0.1", default-features = false, optional = true }
+tower-http   = { version = "0.6", default-features = false, features = ["fs"], optional = true }
 
 # Async channels + runtime. Sync primitives are always on (radio uses them on
 # both native and wasm); the runtime is only on native via the target section
 # below.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
-# WASM async timers
+# WASM async timers + WebSocket client (futures-based).
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
+gloo-net    = { version = "0.6", default-features = false, features = ["websocket"], optional = true }
 
 # WASM entry point
 wasm-bindgen             = { version = "0.2",  optional = true }
@@ -87,6 +93,11 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "m
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+
+[[bin]]
+name = "mesh_web"
+path = "src/bin/mesh_web.rs"
+required-features = ["wasm"]
 
 [build-dependencies]
 prost-build = "0.13"

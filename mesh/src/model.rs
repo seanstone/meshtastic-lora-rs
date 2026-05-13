@@ -47,10 +47,10 @@ pub enum SimMode {
 
 // ── Log ─────────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum MsgDir { Tx, Rx, Fwd, System, Error }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub time:        String,
     pub dir:         MsgDir,

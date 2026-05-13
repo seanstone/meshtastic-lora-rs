@@ -18,6 +18,7 @@ pub mod proto;
 pub mod presets;
 pub mod app;
 pub mod model;
+pub mod proto_ws;
 pub mod radio;
 pub mod view;
 pub mod serial;

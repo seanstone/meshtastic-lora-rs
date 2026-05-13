@@ -13,7 +13,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::{
@@ -25,11 +24,12 @@ use axum::{
     response::{Html, IntoResponse},
     routing::get,
 };
-use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::UnboundedSender;
+use tower_http::services::ServeDir;
 
-use crate::model::{Command, LogEntry, SimMode, ViewModel};
+use crate::model::{Command, ViewModel};
+use crate::proto_ws::{ServerMsg, Snapshot};
 
 // ── Shared state held by axum ──────────────────────────────────────────────
 
@@ -39,84 +39,29 @@ struct AppState {
     cmd_tx: UnboundedSender<Command>,
 }
 
-// ── Wire types: server → client ─────────────────────────────────────────────
-
-#[derive(Serialize)]
-#[serde(tag = "t", content = "c")]
-pub enum ServerMsg {
-    /// Periodic full snapshot of the radio state.
-    Snapshot(Snapshot),
-    /// Single log line appended (reserved — not emitted yet; the snapshot's
-    /// stats fields and a client-side log mirror are enough for the first cut).
-    LogAppend(LogEntry),
-    /// A deserialization or protocol error sent back to the offending client.
-    Error(String),
-}
-
-#[derive(Serialize)]
-pub struct Snapshot {
-    pub running:        bool,
-    pub sf:             u8,
-    pub signal_db:      f32,
-    pub noise_db:       f32,
-    pub interval_ms:    u64,
-    pub mode:           SimMode,
-    pub node_id_str:    String,
-    pub node_short:     String,
-    pub node_long:      String,
-    pub neighbours:     Vec<String>,
-    pub tx_count:       u64,
-    pub rx_count:       u64,
-    pub use_uhd:        bool,
-    pub uhd_args:       String,
-    pub uhd_freq_hz:    f64,
-    pub uhd_rx_gain_db: f64,
-    pub uhd_tx_gain_db: f64,
-    pub uhd_loading:    bool,
-    pub uhd_warning:    Option<String>,
-    pub auto_tx:        bool,
-    pub tx_dest:        u32,
-}
-
-fn snapshot_of(vm: &ViewModel) -> Snapshot {
-    Snapshot {
-        running:        vm.running.load(Ordering::Relaxed),
-        sf:             *vm.sf.lock().unwrap(),
-        signal_db:      *vm.signal_db.lock().unwrap(),
-        noise_db:       *vm.noise_db.lock().unwrap(),
-        interval_ms:    *vm.interval_ms.lock().unwrap(),
-        mode:           *vm.mode.lock().unwrap(),
-        node_id_str:    vm.node_id_str.lock().unwrap().clone(),
-        node_short:     vm.node_short.lock().unwrap().clone(),
-        node_long:      vm.node_long.lock().unwrap().clone(),
-        neighbours:     vm.neighbours.lock().unwrap().clone(),
-        tx_count:       vm.tx_count.load(Ordering::Relaxed),
-        rx_count:       vm.rx_count.load(Ordering::Relaxed),
-        use_uhd:        vm.use_uhd.load(Ordering::Relaxed),
-        uhd_args:       vm.uhd_args.lock().unwrap().clone(),
-        uhd_freq_hz:    *vm.uhd_freq_hz.lock().unwrap(),
-        uhd_rx_gain_db: *vm.uhd_rx_gain_db.lock().unwrap(),
-        uhd_tx_gain_db: *vm.uhd_tx_gain_db.lock().unwrap(),
-        uhd_loading:    vm.uhd_loading.load(Ordering::Relaxed),
-        uhd_warning:    vm.uhd_warning.lock().unwrap().clone(),
-        auto_tx:        vm.auto_tx.load(Ordering::Relaxed),
-        tx_dest:        *vm.tx_dest.lock().unwrap(),
-    }
-}
-
 // ── Entry point ────────────────────────────────────────────────────────────
 
 /// Bind to `addr` and serve HTTP + WS until the listener errors. Long-running.
+///
+/// Static files: if `./dist` exists at startup (i.e. you ran `make wasm-web`
+/// first), it's served as the fallback — `GET /` hits `dist/index.html`,
+/// `GET /mesh_web_bg.wasm` hits the wasm payload, etc. Otherwise `/` returns
+/// a placeholder page explaining the wire protocol.
 pub async fn serve(
     addr: SocketAddr,
     shared: Arc<ViewModel>,
     cmd_tx: UnboundedSender<Command>,
 ) -> std::io::Result<()> {
     let state = AppState { shared, cmd_tx };
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/ws", get(ws_handler))
-        .with_state(state);
+    let dist = std::path::Path::new("./dist");
+    let mut app = Router::new().route("/ws", get(ws_handler));
+    if dist.is_dir() {
+        eprintln!("[server] serving static assets from ./dist");
+        app = app.fallback_service(ServeDir::new(dist));
+    } else {
+        app = app.route("/", get(index_placeholder));
+    }
+    let app = app.with_state(state);
     let listener = TcpListener::bind(addr).await?;
     eprintln!("[server] listening on http://{addr}");
     axum::serve(listener, app).await
@@ -124,7 +69,7 @@ pub async fn serve(
 
 // ── Handlers ───────────────────────────────────────────────────────────────
 
-async fn index() -> Html<&'static str> {
+async fn index_placeholder() -> Html<&'static str> {
     Html(INDEX_PLACEHOLDER)
 }
 
@@ -148,7 +93,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     eprintln!("[server] ws client connected");
 
     // Send an initial snapshot so the client can render immediately.
-    if !send_msg(&mut socket, &ServerMsg::Snapshot(snapshot_of(&state.shared))).await {
+    if !send_msg(&mut socket, &ServerMsg::Snapshot(Snapshot::from_view(&state.shared))).await {
         return;
     }
 
@@ -158,7 +103,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     loop {
         tokio::select! {
             _ = snapshot_interval.tick() => {
-                let msg = ServerMsg::Snapshot(snapshot_of(&state.shared));
+                let msg = ServerMsg::Snapshot(Snapshot::from_view(&state.shared));
                 if !send_msg(&mut socket, &msg).await { break; }
             }
             incoming = socket.recv() => {
