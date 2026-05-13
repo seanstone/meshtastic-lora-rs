@@ -10,8 +10,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::Receiver;
 use std::time::Duration;
+
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use rustfft::num_complex::Complex;
 
@@ -123,7 +124,7 @@ fn build_node(shared: &ViewModel) -> MeshNode {
 ///
 /// `cmd_rx` carries [`Command`]s from the UI (or, later, the WS server) — the
 /// loop is the sole writer of [`ViewModel`].
-pub async fn sim_loop(shared: Arc<ViewModel>, cmd_rx: Receiver<Command>) {
+pub async fn sim_loop(shared: Arc<ViewModel>, mut cmd_rx: UnboundedReceiver<Command>) {
     let mut node = build_node(&shared);
 
     let mut driver: Box<dyn Driver> = make_driver(&shared);

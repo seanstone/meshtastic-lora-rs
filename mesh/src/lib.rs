@@ -23,3 +23,5 @@ pub mod view;
 pub mod serial;
 pub mod mqtt;
 pub mod ws;
+#[cfg(feature = "server")]
+pub mod server;

@@ -7,10 +7,10 @@
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
 
 #[cfg(not(target_arch = "wasm32"))]
 use eframe::egui;
+use tokio::sync::mpsc;
 
 use mesh::{model::ViewModel, radio::sim_loop, view::MeshSimApp};
 
@@ -28,7 +28,7 @@ mod wasm_entry {
         console_error_panic_hook::set_once();
 
         let shared = ViewModel::new();
-        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let shared_sim = Arc::clone(&shared);
         wasm_bindgen_futures::spawn_local(sim_loop(shared_sim, cmd_rx));
 
@@ -70,7 +70,7 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    let (cmd_tx, cmd_rx) = mpsc::channel();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let shared_sim = Arc::clone(&shared);
 
     std::thread::spawn(move || {

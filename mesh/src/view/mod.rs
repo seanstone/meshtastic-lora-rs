@@ -6,8 +6,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::Sender;
 use std::time::Duration;
+
+use tokio::sync::mpsc::UnboundedSender;
 
 use eframe::egui::{self, Color32, RichText, ScrollArea};
 use lora::ui::Chart;
@@ -30,7 +31,7 @@ const MOBILE_BREAKPOINT: f32 = 600.0;
 
 pub struct MeshSimApp {
     shared:          Arc<ViewModel>,
-    cmd_tx:          Sender<Command>,
+    cmd_tx:          UnboundedSender<Command>,
     sf:              u8,
     signal_db:       f32,
     noise_db:        f32,
@@ -62,7 +63,7 @@ pub struct MeshSimApp {
 }
 
 impl MeshSimApp {
-    pub fn new(shared: Arc<ViewModel>, cmd_tx: Sender<Command>) -> Self {
+    pub fn new(shared: Arc<ViewModel>, cmd_tx: UnboundedSender<Command>) -> Self {
         let mut spectrum_chart = Chart::new("spectrum");
         spectrum_chart.set_x_limits([0.0, FFT_SIZE as f64]);
         spectrum_chart.set_y_limits([-90.0, 50.0]);

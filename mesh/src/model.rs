@@ -11,6 +11,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use serde::{Deserialize, Serialize};
+
 use lora::ui::{SpectrumPlot, WaterfallPlot};
 
 use crate::mac::packet::BROADCAST;
@@ -33,7 +35,7 @@ pub const SR_HZ: u64 = 1_000_000;
 // ── Operating mode ──────────────────────────────────────────────────────────
 
 /// Operating mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SimMode {
     /// Normal operation. Manual + auto TX/RX on a single node. Use with UHD
     /// to talk to real Meshtastic radios.
@@ -45,10 +47,10 @@ pub enum SimMode {
 
 // ── Log ─────────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum MsgDir { Tx, Rx, Fwd, System, Error }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub time:        String,
     pub dir:         MsgDir,
@@ -67,7 +69,8 @@ pub struct LogEntry {
 /// and the loop calls [`Command::apply`] on each one. Side effects like
 /// flipping `rebuild_driver` or `rebuild_nodes` are part of `apply`, so a
 /// caller doesn't need to know which mutations require a rebuild.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", content = "c")]
 pub enum Command {
     SetSf(u8),
     SetSignalDb(f32),

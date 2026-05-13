@@ -6,15 +6,16 @@ license     = "GPL-3.0-only"
 default-run = "mesh_radio"
 
 [features]
-default = ["native", "uhd", "mqtt", "ws"]
-# Native (non-wasm) build — enables tokio's full async runtime.
-native  = ["tokio/rt", "tokio/rt-multi-thread", "tokio/time", "tokio/sync"]
+default = ["uhd", "mqtt", "ws", "server"]
 # UHD (USRP Hardware Driver) support — forwards to lora crate.
 uhd     = ["lora/uhd"]
-# MQTT bridge support.
+# MQTT bridge support (used by mesh_node --mqtt).
 mqtt    = ["dep:rumqttc"]
-# WebSocket server for external tool integration.
-ws      = ["dep:tokio-tungstenite", "dep:futures-util", "dep:serde", "dep:serde_json"]
+# Legacy WebSocket server for external-tool integration (used by mesh_node --ws).
+# Superseded by `server` for the new `mesh` binary; kept until mesh_node retires.
+ws      = ["dep:tokio-tungstenite", "dep:futures-util", "dep:serde_json"]
+# axum-based HTTP+WS server hosted by the combined `mesh` binary.
+server  = ["dep:axum", "dep:serde_json", "dep:tokio-stream"]
 # WebAssembly build — uses gloo-timers and wasm-bindgen entry point.
 wasm    = [
     "dep:gloo-timers",
@@ -52,14 +53,24 @@ qrcode = "0.14"
 # MQTT bridge (native only, used by mesh_node --mqtt)
 rumqttc = { version = "0.24", optional = true }
 
-# WebSocket server (native only, used by mesh_node --ws)
+# Legacy WebSocket server (used by mesh_node --ws).
 tokio-tungstenite = { version = "0.24", optional = true }
 futures-util      = { version = "0.3", optional = true }
-serde             = { version = "1", features = ["derive"], optional = true }
-serde_json        = { version = "1", optional = true }
 
-# Async runtime (native only)
-tokio = { version = "1", default-features = false, optional = true }
+# Serde derives are always on — the Command enum needs Deserialize for the
+# server feature and Serialize-on-wire ergonomics; serde_json is only pulled
+# in when ws or server is enabled.
+serde      = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+
+# HTTP+WS server (server feature only).
+axum         = { version = "0.7", default-features = false, features = ["http1", "ws", "tokio"], optional = true }
+tokio-stream = { version = "0.1", default-features = false, optional = true }
+
+# Async channels + runtime. Sync primitives are always on (radio uses them on
+# both native and wasm); the runtime is only on native via the target section
+# below.
+tokio = { version = "1", default-features = false, features = ["sync"] }
 
 # WASM async timers
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
@@ -72,7 +83,7 @@ web-sys                  = { version = "0.3",  optional = true, features = ["Win
 console_error_panic_hook = { version = "0.1",  optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "sync", "macros", "signal"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
