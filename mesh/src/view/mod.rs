@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use eframe::egui::{self, Color32, RichText, ScrollArea};
@@ -14,7 +15,7 @@ use lora::ui::Chart;
 use crate::mac::packet::BROADCAST;
 use crate::presets::{DEFAULT_REGION_IDX, ModemPreset, PRESETS, REGIONS, Region};
 use crate::model::{
-    ViewModel, SimMode, MsgDir,
+    ViewModel, SimMode, MsgDir, Command,
     DEFAULT_SF, DEFAULT_SIGNAL_DB, DEFAULT_NOISE_DB, DEFAULT_INTERVAL_MS,
     DEFAULT_PRESET_IDX, FFT_SIZE, SR_HZ,
 };
@@ -29,6 +30,7 @@ const MOBILE_BREAKPOINT: f32 = 600.0;
 
 pub struct MeshSimApp {
     shared:          Arc<ViewModel>,
+    cmd_tx:          Sender<Command>,
     sf:              u8,
     signal_db:       f32,
     noise_db:        f32,
@@ -60,7 +62,7 @@ pub struct MeshSimApp {
 }
 
 impl MeshSimApp {
-    pub fn new(shared: Arc<ViewModel>) -> Self {
+    pub fn new(shared: Arc<ViewModel>, cmd_tx: Sender<Command>) -> Self {
         let mut spectrum_chart = Chart::new("spectrum");
         spectrum_chart.set_x_limits([0.0, FFT_SIZE as f64]);
         spectrum_chart.set_y_limits([-90.0, 50.0]);
@@ -79,12 +81,12 @@ impl MeshSimApp {
 
         let init_uhd = shared.use_uhd.load(Ordering::Relaxed);
         if init_uhd {
-            shared.auto_tx.store(false, Ordering::Relaxed);
-            *shared.mode.lock().unwrap() = SimMode::Listen;
-            shared.rebuild_nodes.store(true, Ordering::Relaxed);
+            let _ = cmd_tx.send(Command::SetAutoTx(false));
+            let _ = cmd_tx.send(Command::SetMode(SimMode::Listen));
         }
         Self {
             shared,
+            cmd_tx,
             sf: DEFAULT_SF,
             signal_db: DEFAULT_SIGNAL_DB,
             noise_db: DEFAULT_NOISE_DB,
@@ -114,13 +116,17 @@ impl MeshSimApp {
         }
     }
 
+    fn send(&self, cmd: Command) {
+        let _ = self.cmd_tx.send(cmd);
+    }
+
     fn apply_preset(&mut self, p: &ModemPreset) {
         self.sf = p.sf;
-        *self.shared.sf.lock().unwrap() = p.sf;
+        self.send(Command::SetSf(p.sf));
         // Recalculate frequency — channel centre depends on BW.
         let r = &REGIONS[self.region_idx];
         self.uhd_freq_mhz = r.channel_freq(p.bw_khz);
-        *self.shared.uhd_freq_hz.lock().unwrap() = self.uhd_freq_mhz * 1e6;
+        self.send(Command::SetUhdFreqHz(self.uhd_freq_mhz * 1e6));
     }
 
     fn restore_defaults(&mut self) {
@@ -130,22 +136,16 @@ impl MeshSimApp {
         self.signal_db   = DEFAULT_SIGNAL_DB;
         self.noise_db    = DEFAULT_NOISE_DB;
         self.interval_ms = DEFAULT_INTERVAL_MS;
-        *self.shared.sf.lock().unwrap()          = self.sf;
-        *self.shared.signal_db.lock().unwrap()   = self.signal_db;
-        *self.shared.noise_db.lock().unwrap()    = self.noise_db;
-        *self.shared.interval_ms.lock().unwrap() = self.interval_ms;
-        self.auto_tx = true;
-        self.shared.auto_tx.store(true, Ordering::Relaxed);
+        self.auto_tx     = true;
+        self.send(Command::SetSf(self.sf));
+        self.send(Command::SetSignalDb(self.signal_db));
+        self.send(Command::SetNoiseDb(self.noise_db));
+        self.send(Command::SetIntervalMs(self.interval_ms));
+        self.send(Command::SetAutoTx(true));
     }
 
     fn reset_stats(&self) {
-        self.shared.tx_count.store(0, Ordering::Relaxed);
-        self.shared.rx_count.store(0, Ordering::Relaxed);
-        self.shared.log.lock().unwrap().clear();
-    }
-
-    fn trigger_rebuild(&self) {
-        self.shared.rebuild_driver.store(true, Ordering::Relaxed);
+        self.send(Command::ResetStats);
     }
 
     /// Get or create the QR code texture for the GitHub repo URL.
@@ -190,15 +190,13 @@ impl MeshSimApp {
                 && self.mode != SimMode::Terminal
             {
                 self.mode = SimMode::Terminal;
-                *self.shared.mode.lock().unwrap() = self.mode;
-                self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
+                self.send(Command::SetMode(self.mode));
             }
             if ui.selectable_label(self.mode == SimMode::Listen, "Listen").clicked()
                 && self.mode != SimMode::Listen
             {
                 self.mode = SimMode::Listen;
-                *self.shared.mode.lock().unwrap() = self.mode;
-                self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
+                self.send(Command::SetMode(self.mode));
             }
         });
     }
@@ -233,16 +231,13 @@ impl MeshSimApp {
     fn apply_region(&mut self, r: &Region) {
         let bw = PRESETS[self.preset_idx].bw_khz;
         self.uhd_freq_mhz = r.channel_freq(bw);
-        *self.shared.uhd_freq_hz.lock().unwrap() = self.uhd_freq_mhz * 1e6;
-        if self.use_uhd {
-            self.trigger_rebuild();
-        }
+        self.send(Command::SetUhdFreqHz(self.uhd_freq_mhz * 1e6));
     }
 
     fn ui_sf_slider(&mut self, ui: &mut egui::Ui) {
         ui.label(format!("SF  {}", self.sf));
         if ui.add(egui::Slider::new(&mut self.sf, 7_u8..=12).show_value(false)).changed() {
-            *self.shared.sf.lock().unwrap() = self.sf;
+            self.send(Command::SetSf(self.sf));
         }
     }
 
@@ -250,12 +245,12 @@ impl MeshSimApp {
         if !self.use_uhd {
             ui.label(format!("TX gain  {:.0} dBFS", self.signal_db));
             if ui.add(egui::Slider::new(&mut self.signal_db, -40.0_f32..=20.0).show_value(false)).changed() {
-                *self.shared.signal_db.lock().unwrap() = self.signal_db;
+                self.send(Command::SetSignalDb(self.signal_db));
             }
         } else {
             ui.label(format!("TX gain  {:.0} dB", self.uhd_tx_gain_db));
             if ui.add(egui::Slider::new(&mut self.uhd_tx_gain_db, 0.0_f64..=89.0).show_value(false)).changed() {
-                *self.shared.uhd_tx_gain_db.lock().unwrap() = self.uhd_tx_gain_db;
+                self.send(Command::SetUhdTxGainDb(self.uhd_tx_gain_db));
             }
         }
     }
@@ -264,26 +259,26 @@ impl MeshSimApp {
         if !self.use_uhd {
             ui.label(format!("Noise  {:.0} dBFS", self.noise_db));
             if ui.add(egui::Slider::new(&mut self.noise_db, -80.0_f32..=0.0).show_value(false)).changed() {
-                *self.shared.noise_db.lock().unwrap() = self.noise_db;
+                self.send(Command::SetNoiseDb(self.noise_db));
             }
             ui.label(RichText::new(format!("SNR  {:.0} dB", self.snr_db()))
                 .color(if self.snr_db() > 0.0 { Color32::GREEN } else { Color32::YELLOW }));
         } else {
             ui.label(format!("RX gain  {:.0} dB", self.uhd_rx_gain_db));
             if ui.add(egui::Slider::new(&mut self.uhd_rx_gain_db, 0.0_f64..=76.0).show_value(false)).changed() {
-                *self.shared.uhd_rx_gain_db.lock().unwrap() = self.uhd_rx_gain_db;
+                self.send(Command::SetUhdRxGainDb(self.uhd_rx_gain_db));
             }
         }
     }
 
     fn ui_auto_tx(&mut self, ui: &mut egui::Ui) {
         if ui.checkbox(&mut self.auto_tx, "Auto TX").changed() {
-            self.shared.auto_tx.store(self.auto_tx, Ordering::Relaxed);
+            self.send(Command::SetAutoTx(self.auto_tx));
         }
         ui.add_enabled_ui(self.auto_tx, |ui| {
             ui.label(format!("Interval  {} ms", self.interval_ms));
             if ui.add(egui::Slider::new(&mut self.interval_ms, 200_u64..=10000).show_value(false)).changed() {
-                *self.shared.interval_ms.lock().unwrap() = self.interval_ms;
+                self.send(Command::SetIntervalMs(self.interval_ms));
             }
         });
     }
@@ -292,7 +287,7 @@ impl MeshSimApp {
         ui.horizontal(|ui| {
             let running = self.shared.running.load(Ordering::Relaxed);
             if ui.button(if running { "⏸ Pause" } else { "▶ Resume" }).clicked() {
-                self.shared.running.store(!running, Ordering::Relaxed);
+                self.send(Command::SetRunning(!running));
             }
             if ui.button("Defaults").clicked() {
                 self.restore_defaults();
@@ -304,15 +299,13 @@ impl MeshSimApp {
         ui.horizontal(|ui| {
             if ui.selectable_label(!self.use_uhd, "Sim").clicked() && self.use_uhd {
                 self.use_uhd = false;
-                self.shared.use_uhd.store(false, Ordering::Relaxed);
-                self.trigger_rebuild();
+                self.send(Command::SetUhdEnabled(false));
             }
             #[cfg(feature = "uhd")]
             if ui.selectable_label(self.use_uhd, "UHD").clicked() && !self.use_uhd {
                 self.use_uhd = true;
                 self.uhd_warning = None;
-                self.shared.use_uhd.store(true, Ordering::Relaxed);
-                self.trigger_rebuild();
+                self.send(Command::SetUhdEnabled(true));
             }
             #[cfg(not(feature = "uhd"))]
             {
@@ -333,8 +326,7 @@ impl MeshSimApp {
                 .desired_width(f32::INFINITY),
         );
         if args_resp.lost_focus() {
-            *self.shared.uhd_args.lock().unwrap() = self.uhd_args.clone();
-            self.trigger_rebuild();
+            self.send(Command::SetUhdArgs(self.uhd_args.clone()));
         }
         ui.horizontal(|ui| {
             ui.label("Freq");
@@ -344,8 +336,7 @@ impl MeshSimApp {
                     .speed(0.1)
                     .suffix(" MHz"),
             ).changed() {
-                *self.shared.uhd_freq_hz.lock().unwrap() = self.uhd_freq_mhz * 1e6;
-                self.trigger_rebuild();
+                self.send(Command::SetUhdFreqHz(self.uhd_freq_mhz * 1e6));
             }
         });
     }
@@ -383,8 +374,7 @@ impl MeshSimApp {
                     .desired_width(40.0)
                     .char_limit(4),
             ).lost_focus() {
-                *self.shared.node_short.lock().unwrap() = self.node_short.clone();
-                self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
+                self.send(Command::SetNodeShort(self.node_short.clone()));
             }
         });
         ui.horizontal(|ui| {
@@ -393,8 +383,7 @@ impl MeshSimApp {
                 egui::TextEdit::singleline(&mut self.node_long)
                     .desired_width(ui.available_width()),
             ).lost_focus() {
-                *self.shared.node_long.lock().unwrap() = self.node_long.clone();
-                self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
+                self.send(Command::SetNodeLong(self.node_long.clone()));
             }
         });
         ui.add_space(4.0);
@@ -418,7 +407,7 @@ impl MeshSimApp {
                 .show_ui(ui, |ui| {
                     if ui.selectable_label(self.tx_dest == BROADCAST, "Broadcast").clicked() {
                         self.tx_dest = BROADCAST;
-                        *self.shared.tx_dest.lock().unwrap() = BROADCAST;
+                        self.send(Command::SetTxDest(BROADCAST));
                     }
                     let neighbours = self.shared.neighbours.lock().unwrap().clone();
                     for entry in &neighbours {
@@ -427,7 +416,7 @@ impl MeshSimApp {
                                 let label = entry.split(" (!").next().unwrap_or(hex);
                                 if ui.selectable_label(self.tx_dest == id, label).clicked() {
                                     self.tx_dest = id;
-                                    *self.shared.tx_dest.lock().unwrap() = id;
+                                    self.send(Command::SetTxDest(id));
                                 }
                             }
                         }
@@ -442,7 +431,7 @@ impl MeshSimApp {
                 let cleaned = self.tx_dest_input.trim_start_matches("!").trim_start_matches("0x");
                 if let Ok(id) = u32::from_str_radix(cleaned, 16) {
                     self.tx_dest = id;
-                    *self.shared.tx_dest.lock().unwrap() = id;
+                    self.send(Command::SetTxDest(id));
                 }
                 self.tx_dest_input.clear();
             }
@@ -457,7 +446,7 @@ impl MeshSimApp {
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (ui.button("Send").clicked() || enter) && !self.msg_input.is_empty() {
                 let text = std::mem::take(&mut self.msg_input);
-                self.shared.tx_queue.lock().unwrap().push_back(text);
+                self.send(Command::SendText(text));
                 resp.request_focus();
             }
         });
@@ -669,7 +658,7 @@ impl MeshSimApp {
             ui.horizontal(|ui| {
                 // Play / Pause.
                 if ui.button(if running { "⏸" } else { "▶" }).clicked() {
-                    self.shared.running.store(!running, Ordering::Relaxed);
+                    self.send(Command::SetRunning(!running));
                 }
 
                 // Menu toggle.
@@ -758,7 +747,7 @@ impl MeshSimApp {
                             )
                             .changed()
                             {
-                                *self.shared.sf.lock().unwrap() = self.sf;
+                                self.send(Command::SetSf(self.sf));
                             }
                             ui.end_row();
 
@@ -771,7 +760,7 @@ impl MeshSimApp {
                                 )
                                 .changed()
                                 {
-                                    *self.shared.signal_db.lock().unwrap() = self.signal_db;
+                                    self.send(Command::SetSignalDb(self.signal_db));
                                 }
                             } else {
                                 ui.label(format!("TX {:.0}dB", self.uhd_tx_gain_db));
@@ -781,8 +770,7 @@ impl MeshSimApp {
                                 )
                                 .changed()
                                 {
-                                    *self.shared.uhd_tx_gain_db.lock().unwrap() =
-                                        self.uhd_tx_gain_db;
+                                    self.send(Command::SetUhdTxGainDb(self.uhd_tx_gain_db));
                                 }
                             }
                             ui.end_row();
@@ -796,7 +784,7 @@ impl MeshSimApp {
                                 )
                                 .changed()
                                 {
-                                    *self.shared.noise_db.lock().unwrap() = self.noise_db;
+                                    self.send(Command::SetNoiseDb(self.noise_db));
                                 }
                                 ui.end_row();
                                 ui.label("SNR");
@@ -817,8 +805,7 @@ impl MeshSimApp {
                                 )
                                 .changed()
                                 {
-                                    *self.shared.uhd_rx_gain_db.lock().unwrap() =
-                                        self.uhd_rx_gain_db;
+                                    self.send(Command::SetUhdRxGainDb(self.uhd_rx_gain_db));
                                 }
                             }
                             ui.end_row();
@@ -827,7 +814,7 @@ impl MeshSimApp {
                             ui.label("Auto TX");
                             ui.horizontal(|ui| {
                                 if ui.checkbox(&mut self.auto_tx, "").changed() {
-                                    self.shared.auto_tx.store(self.auto_tx, Ordering::Relaxed);
+                                    self.send(Command::SetAutoTx(self.auto_tx));
                                 }
                                 if self.auto_tx {
                                     ui.label(format!("{} ms", self.interval_ms));
@@ -843,7 +830,7 @@ impl MeshSimApp {
                                 )
                                 .changed()
                                 {
-                                    *self.shared.interval_ms.lock().unwrap() = self.interval_ms;
+                                    self.send(Command::SetIntervalMs(self.interval_ms));
                                 }
                                 ui.end_row();
                             }
@@ -861,9 +848,7 @@ impl MeshSimApp {
                                         .desired_width(ui.available_width()),
                                 );
                                 if args_resp.lost_focus() {
-                                    *self.shared.uhd_args.lock().unwrap() =
-                                        self.uhd_args.clone();
-                                    self.trigger_rebuild();
+                                    self.send(Command::SetUhdArgs(self.uhd_args.clone()));
                                 }
                                 ui.end_row();
                                 ui.label("Freq");
@@ -875,9 +860,7 @@ impl MeshSimApp {
                                 )
                                 .changed()
                                 {
-                                    *self.shared.uhd_freq_hz.lock().unwrap() =
-                                        self.uhd_freq_mhz * 1e6;
-                                    self.trigger_rebuild();
+                                    self.send(Command::SetUhdFreqHz(self.uhd_freq_mhz * 1e6));
                                 }
                                 ui.end_row();
                             }

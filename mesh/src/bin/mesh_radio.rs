@@ -7,6 +7,7 @@
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 
 #[cfg(not(target_arch = "wasm32"))]
 use eframe::egui;
@@ -27,8 +28,9 @@ mod wasm_entry {
         console_error_panic_hook::set_once();
 
         let shared = ViewModel::new();
+        let (cmd_tx, cmd_rx) = mpsc::channel();
         let shared_sim = Arc::clone(&shared);
-        wasm_bindgen_futures::spawn_local(sim_loop(shared_sim));
+        wasm_bindgen_futures::spawn_local(sim_loop(shared_sim, cmd_rx));
 
         let canvas = web_sys::window().unwrap()
             .document().unwrap()
@@ -39,7 +41,7 @@ mod wasm_entry {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(move |_cc| Ok(Box::new(MeshSimApp::new(shared)))),
+                Box::new(move |_cc| Ok(Box::new(MeshSimApp::new(shared, cmd_tx)))),
             )
             .await;
     }
@@ -68,11 +70,12 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    let (cmd_tx, cmd_rx) = mpsc::channel();
     let shared_sim = Arc::clone(&shared);
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(sim_loop(shared_sim));
+        rt.block_on(sim_loop(shared_sim, cmd_rx));
     });
 
     let options = eframe::NativeOptions {
@@ -84,6 +87,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Mesh Radio",
         options,
-        Box::new(|_cc| Ok(Box::new(MeshSimApp::new(shared)))),
+        Box::new(|_cc| Ok(Box::new(MeshSimApp::new(shared, cmd_tx)))),
     )
 }

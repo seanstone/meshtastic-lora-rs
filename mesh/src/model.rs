@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use lora::ui::{SpectrumPlot, WaterfallPlot};
@@ -33,7 +33,7 @@ pub const SR_HZ: u64 = 1_000_000;
 // ── Operating mode ──────────────────────────────────────────────────────────
 
 /// Operating mode.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimMode {
     /// Normal operation. Manual + auto TX/RX on a single node. Use with UHD
     /// to talk to real Meshtastic radios.
@@ -56,6 +56,87 @@ pub struct LogEntry {
     pub from_id:     Option<u32>,
     pub hops:        Option<u8>,
     pub self_origin: bool,
+}
+
+// ── Commands ────────────────────────────────────────────────────────────────
+
+/// A user-initiated mutation of the radio state.
+///
+/// The radio loop is the sole writer of [`ViewModel`]; UI code (desktop egui
+/// today, web egui in the future) dispatches `Command`s on an `mpsc` channel
+/// and the loop calls [`Command::apply`] on each one. Side effects like
+/// flipping `rebuild_driver` or `rebuild_nodes` are part of `apply`, so a
+/// caller doesn't need to know which mutations require a rebuild.
+#[derive(Debug, Clone)]
+pub enum Command {
+    SetSf(u8),
+    SetSignalDb(f32),
+    SetNoiseDb(f32),
+    SetIntervalMs(u64),
+    SetMode(SimMode),
+    SetNodeShort(String),
+    SetNodeLong(String),
+    SetTxDest(u32),
+    SetUhdEnabled(bool),
+    SetUhdArgs(String),
+    SetUhdFreqHz(f64),
+    SetUhdRxGainDb(f64),
+    SetUhdTxGainDb(f64),
+    SetAutoTx(bool),
+    SetRunning(bool),
+    SendText(String),
+    ResetStats,
+}
+
+impl Command {
+    pub fn apply(self, vm: &ViewModel) {
+        match self {
+            Command::SetSf(n)         => *vm.sf.lock().unwrap() = n,
+            Command::SetSignalDb(v)   => *vm.signal_db.lock().unwrap() = v,
+            Command::SetNoiseDb(v)    => *vm.noise_db.lock().unwrap() = v,
+            Command::SetIntervalMs(v) => *vm.interval_ms.lock().unwrap() = v,
+            Command::SetMode(m) => {
+                *vm.mode.lock().unwrap() = m;
+                vm.rebuild_nodes.store(true, Ordering::Relaxed);
+            }
+            Command::SetNodeShort(s) => {
+                *vm.node_short.lock().unwrap() = s;
+                vm.rebuild_nodes.store(true, Ordering::Relaxed);
+            }
+            Command::SetNodeLong(s) => {
+                *vm.node_long.lock().unwrap() = s;
+                vm.rebuild_nodes.store(true, Ordering::Relaxed);
+            }
+            Command::SetTxDest(id) => *vm.tx_dest.lock().unwrap() = id,
+            Command::SetUhdEnabled(on) => {
+                vm.use_uhd.store(on, Ordering::Relaxed);
+                if on { *vm.uhd_warning.lock().unwrap() = None; }
+                vm.rebuild_driver.store(true, Ordering::Relaxed);
+            }
+            Command::SetUhdArgs(s) => {
+                *vm.uhd_args.lock().unwrap() = s;
+                if vm.use_uhd.load(Ordering::Relaxed) {
+                    vm.rebuild_driver.store(true, Ordering::Relaxed);
+                }
+            }
+            Command::SetUhdFreqHz(hz) => {
+                *vm.uhd_freq_hz.lock().unwrap() = hz;
+                if vm.use_uhd.load(Ordering::Relaxed) {
+                    vm.rebuild_driver.store(true, Ordering::Relaxed);
+                }
+            }
+            Command::SetUhdRxGainDb(v) => *vm.uhd_rx_gain_db.lock().unwrap() = v,
+            Command::SetUhdTxGainDb(v) => *vm.uhd_tx_gain_db.lock().unwrap() = v,
+            Command::SetAutoTx(on)     => vm.auto_tx.store(on, Ordering::Relaxed),
+            Command::SetRunning(on)    => vm.running.store(on, Ordering::Relaxed),
+            Command::SendText(s)       => vm.tx_queue.lock().unwrap().push_back(s),
+            Command::ResetStats => {
+                vm.tx_count.store(0, Ordering::Relaxed);
+                vm.rx_count.store(0, Ordering::Relaxed);
+                vm.log.lock().unwrap().clear();
+            }
+        }
+    }
 }
 
 // ── ViewModel ───────────────────────────────────────────────────────────────

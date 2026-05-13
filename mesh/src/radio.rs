@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use rustfft::num_complex::Complex;
@@ -22,7 +23,7 @@ use lora::uhd::UhdDevice;
 
 use crate::app::{ChannelConfig, MeshNode};
 use crate::model::{
-    ViewModel, SimMode, LogEntry, MsgDir,
+    ViewModel, SimMode, LogEntry, MsgDir, Command,
     DEFAULT_SF, DEFAULT_INTERVAL_MS, FFT_SIZE, SR_HZ,
 };
 
@@ -119,7 +120,10 @@ fn build_node(shared: &ViewModel) -> MeshNode {
 // ── Simulation loop ─────────────────────────────────────────────────────────
 
 /// Drive the radio. Long-running; await this until the process exits.
-pub async fn sim_loop(shared: Arc<ViewModel>) {
+///
+/// `cmd_rx` carries [`Command`]s from the UI (or, later, the WS server) — the
+/// loop is the sole writer of [`ViewModel`].
+pub async fn sim_loop(shared: Arc<ViewModel>, cmd_rx: Receiver<Command>) {
     let mut node = build_node(&shared);
 
     let mut driver: Box<dyn Driver> = make_driver(&shared);
@@ -159,6 +163,11 @@ pub async fn sim_loop(shared: Arc<ViewModel>) {
     loop {
         #[cfg(not(target_arch = "wasm32"))]
         let tick_start = std::time::Instant::now();
+
+        // ── Drain pending commands ───────────────────────────────────────
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            cmd.apply(&shared);
+        }
 
         if !shared.running.load(Ordering::Relaxed) {
             tick_sleep(Duration::from_millis(50)).await;
