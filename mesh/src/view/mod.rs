@@ -297,20 +297,19 @@ impl MeshSimApp {
     }
 
     fn ui_driver_selector(&mut self, ui: &mut egui::Ui) {
+        // UHD support is a *server-side* capability — the wasm GUI doesn't
+        // touch UHD itself, so we always offer the toggle and let the server
+        // accept or reject. If it can't open the device, the radio loop sets
+        // uhd_warning and flips use_uhd back to false, which we mirror.
         ui.horizontal(|ui| {
             if ui.selectable_label(!self.use_uhd, "Sim").clicked() && self.use_uhd {
                 self.use_uhd = false;
                 self.send(Command::SetUhdEnabled(false));
             }
-            #[cfg(feature = "uhd")]
             if ui.selectable_label(self.use_uhd, "UHD").clicked() && !self.use_uhd {
                 self.use_uhd = true;
                 self.uhd_warning = None;
                 self.send(Command::SetUhdEnabled(true));
-            }
-            #[cfg(not(feature = "uhd"))]
-            {
-                ui.add_enabled(false, egui::SelectableLabel::new(false, "UHD (disabled)"));
             }
         });
         if let Some(warn) = &self.uhd_warning {
@@ -499,17 +498,18 @@ impl eframe::App for MeshSimApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(32));
 
-        // Sync UHD state — the sim loop may have flipped use_uhd off on failure.
-        #[cfg(feature = "uhd")]
-        {
-            let shared_uhd = self.shared.use_uhd.load(Ordering::Relaxed);
-            if self.use_uhd && !shared_uhd {
-                self.use_uhd = false;
+        // Mirror server-side UHD state into the local toggle state. Bidirectional:
+        // on the wasm client, this picks up the server's initial use_uhd=true
+        // (USRP auto-detected) once the first Snapshot arrives; on the desktop
+        // client, it picks up the sim loop flipping use_uhd off on UHD failure.
+        let shared_uhd = self.shared.use_uhd.load(Ordering::Relaxed);
+        if self.use_uhd != shared_uhd {
+            self.use_uhd = shared_uhd;
+            if !shared_uhd {
                 self.uhd_warning = self.shared.uhd_warning.lock().unwrap().take();
             }
         }
 
-        #[cfg(feature = "uhd")]
         if self.shared.uhd_loading.load(Ordering::Relaxed) {
             egui::Modal::new(egui::Id::new("uhd_loading")).show(ctx, |ui| {
                 ui.set_min_width(220.0);
