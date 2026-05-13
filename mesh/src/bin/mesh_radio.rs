@@ -53,13 +53,11 @@ const REPO_URL: &str = "https://github.com/seanstone/meshtastic-lora-rs";
 
 // ── Operating mode ──────────────────────────────────────────────────────────
 
-/// Simulation mode.
+/// Operating mode.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SimMode {
-    /// Two simulated nodes (A → B).  Auto-TX sends from A, RX decodes on B.
-    TwoNodeTest,
-    /// Single node (terminal).  Manual + auto TX/RX on the same node.
-    /// Use with UHD to talk to real Meshtastic radios.
+    /// Normal operation. Manual + auto TX/RX on a single node. Use with UHD
+    /// to talk to real Meshtastic radios.
     Terminal,
     /// RX-only mode.  No TX at all — no beacons, no forwarding, no user messages.
     /// The USRP stays completely silent.  Good for passive monitoring.
@@ -97,10 +95,8 @@ struct SimShared {
     noise_db:      Mutex<f32>,
     interval_ms:   Mutex<u64>,
     log:           Mutex<VecDeque<LogEntry>>,
-    a_neighbours:  Mutex<Vec<String>>,
-    b_neighbours:  Mutex<Vec<String>>,
-    a_id:          Mutex<String>,
-    b_id:          Mutex<String>,
+    neighbours:    Mutex<Vec<String>>,
+    node_id_str:   Mutex<String>,
     tx_count:      AtomicU64,
     rx_count:      AtomicU64,
 
@@ -123,10 +119,7 @@ struct SimShared {
     rebuild_nodes:  AtomicBool,
     node_short:     Mutex<String>,
     node_long:      Mutex<String>,
-    /// Persistent node IDs — generated once, reused across mode switches.
-    node_id_a:      Mutex<u32>,
-    node_id_b:      Mutex<u32>,
-    node_id_single: Mutex<u32>,
+    node_id:        Mutex<u32>,
     tx_dest:        Mutex<u32>,
 }
 
@@ -145,10 +138,8 @@ impl SimShared {
             noise_db:     Mutex::new(DEFAULT_NOISE_DB),
             interval_ms:  Mutex::new(DEFAULT_INTERVAL_MS),
             log:          Mutex::new(VecDeque::new()),
-            a_neighbours: Mutex::new(vec![]),
-            b_neighbours: Mutex::new(vec![]),
-            a_id:         Mutex::new(String::new()),
-            b_id:         Mutex::new(String::new()),
+            neighbours:   Mutex::new(vec![]),
+            node_id_str:  Mutex::new(String::new()),
             tx_count:     AtomicU64::new(0),
             rx_count:     AtomicU64::new(0),
             spectrum_plot,
@@ -163,13 +154,11 @@ impl SimShared {
             uhd_warning:    Mutex::new(None),
             auto_tx:        AtomicBool::new(true),
             tx_queue:       Mutex::new(VecDeque::new()),
-            mode:           Mutex::new(SimMode::TwoNodeTest),
+            mode:           Mutex::new(SimMode::Terminal),
             rebuild_nodes:  AtomicBool::new(false),
             node_short:     Mutex::new("TERM".into()),
             node_long:      Mutex::new("Mesh Terminal".into()),
-            node_id_a:      Mutex::new(rand::random::<u32>()),
-            node_id_b:      Mutex::new(rand::random::<u32>()),
-            node_id_single: Mutex::new(rand::random::<u32>()),
+            node_id:        Mutex::new(rand::random::<u32>()),
             tx_dest:        Mutex::new(BROADCAST),
         })
     }
@@ -241,54 +230,17 @@ fn make_driver(shared: &SimShared) -> Box<dyn Driver> {
 
 // ── Simulation loop (async, runs on tokio native / spawn_local wasm) ─────────
 
-/// Node state — either two-node test or single-node terminal.
-enum Nodes {
-    TwoNode {
-        tx_node: MeshNode,       // sends (node A)
-        rx_node: MeshNode,       // receives (node B)
-    },
-    Single {
-        node: MeshNode,          // sends and receives
-    },
-}
-
-impl Nodes {
-    fn tx_node(&self) -> &MeshNode {
-        match self { Nodes::TwoNode { tx_node, .. } => tx_node, Nodes::Single { node } => node }
-    }
-    fn rx_node_mut(&mut self) -> &mut MeshNode {
-        match self { Nodes::TwoNode { rx_node, .. } => rx_node, Nodes::Single { node } => node }
-    }
-}
-
-fn build_nodes(mode: SimMode, shared: &SimShared) -> Nodes {
+fn build_node(shared: &SimShared) -> MeshNode {
     let channel_cfg = ChannelConfig::default();
-    match mode {
-        SimMode::TwoNodeTest => {
-            let id_a = *shared.node_id_a.lock().unwrap();
-            let id_b = *shared.node_id_b.lock().unwrap();
-            let tx_node = MeshNode::with_id(channel_cfg.clone(), id_a, "MSIM", "Mesh-Sim Node A");
-            let rx_node = MeshNode::with_id(channel_cfg, id_b, "MRCV", "Mesh-Sim Node B");
-            *shared.a_id.lock().unwrap() = format!("!{:08x}", id_a);
-            *shared.b_id.lock().unwrap() = format!("!{:08x}", id_b);
-            Nodes::TwoNode { tx_node, rx_node }
-        }
-        SimMode::Terminal | SimMode::Listen => {
-            let id    = *shared.node_id_single.lock().unwrap();
-            let short = shared.node_short.lock().unwrap().clone();
-            let long  = shared.node_long.lock().unwrap().clone();
-            let node = MeshNode::with_id(channel_cfg, id, &short, &long);
-            *shared.a_id.lock().unwrap() = format!("!{:08x}", id);
-            *shared.b_id.lock().unwrap() = String::new();
-            *shared.b_neighbours.lock().unwrap() = vec![];
-            Nodes::Single { node }
-        }
-    }
+    let id    = *shared.node_id.lock().unwrap();
+    let short = shared.node_short.lock().unwrap().clone();
+    let long  = shared.node_long.lock().unwrap().clone();
+    *shared.node_id_str.lock().unwrap() = format!("!{:08x}", id);
+    MeshNode::with_id(channel_cfg, id, &short, &long)
 }
 
 async fn sim_loop(shared: Arc<SimShared>) {
-    let mode = *shared.mode.lock().unwrap();
-    let mut nodes = build_nodes(mode, &shared);
+    let mut node = build_node(&shared);
 
     let mut driver: Box<dyn Driver> = make_driver(&shared);
     shared.uhd_loading.store(false, Ordering::Relaxed);
@@ -333,14 +285,13 @@ async fn sim_loop(shared: Arc<SimShared>) {
             continue;
         }
 
-        // ── Node rebuild (mode change) ────────────────────────────────────
+        // ── Node rebuild (name change / mode change) ──────────────────────
         if shared.rebuild_nodes.swap(false, Ordering::Relaxed) {
+            node = build_node(&shared);
             let new_mode = *shared.mode.lock().unwrap();
-            nodes = build_nodes(new_mode, &shared);
             push_log(&shared, MsgDir::System, match new_mode {
-                SimMode::TwoNodeTest => "Mode → Two-Node Test".into(),
-                SimMode::Terminal    => "Mode → Terminal".into(),
-                SimMode::Listen      => "Mode → Listen (RX only)".into(),
+                SimMode::Terminal => "Mode → Terminal".into(),
+                SimMode::Listen   => "Mode → Listen (RX only)".into(),
             });
         }
 
@@ -455,26 +406,14 @@ async fn sim_loop(shared: Arc<SimShared>) {
             next_beacon_at = produced + BEACON_INTERVAL;
 
             if tx_allowed {
-                // TX node always beacons.
-                if let Some(frame) = nodes.tx_node().build_nodeinfo_frame() {
+                if let Some(frame) = node.build_nodeinfo_frame() {
                     let iq = tx_modem.modulate(&frame.to_bytes());
                     driver.push_samples(iq);
                 }
-                // In TwoNodeTest mode, RX node also beacons.
-                if let Nodes::TwoNode { rx_node, .. } = &nodes {
-                    if let Some(frame) = rx_node.build_nodeinfo_frame() {
-                        let iq = tx_modem.modulate(&frame.to_bytes());
-                        driver.push_samples(iq);
-                    }
-                }
             }
 
-            *shared.a_neighbours.lock().unwrap() = nodes.tx_node().neighbours()
+            *shared.neighbours.lock().unwrap() = node.neighbours()
                 .iter().map(|n| format!("{} (!{:08x})", n.short_name, n.node_id)).collect();
-            if let Nodes::TwoNode { rx_node, .. } = &nodes {
-                *shared.b_neighbours.lock().unwrap() = rx_node.neighbours()
-                    .iter().map(|n| format!("{} (!{:08x})", n.short_name, n.node_id)).collect();
-            }
         }
 
         // ── Read destination ──────────────────────────────────────────────
@@ -484,7 +423,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
         if tx_allowed {
             let manual: Vec<String> = shared.tx_queue.lock().unwrap().drain(..).collect();
             for text in manual {
-                if let Some(frame) = nodes.tx_node().build_text_frame(tx_dest, &text) {
+                if let Some(frame) = node.build_text_frame(tx_dest, &text) {
                     shared.tx_count.fetch_add(1, Ordering::Relaxed);
                     push_log(&shared, MsgDir::Tx, format!("\"{text}\""));
                     let iq = tx_modem.modulate(&frame.to_bytes());
@@ -501,7 +440,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
             seq += 1;
             let text = format!("Test #{seq}");
 
-            if let Some(frame) = nodes.tx_node().build_text_frame(tx_dest, &text) {
+            if let Some(frame) = node.build_text_frame(tx_dest, &text) {
                 shared.tx_count.fetch_add(1, Ordering::Relaxed);
                 push_log(&shared, MsgDir::Tx, format!("\"{text}\""));
                 let iq = tx_modem.modulate(&frame.to_bytes());
@@ -546,7 +485,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
                     rx_buffer.drain(..consumed);
                     let bw_hz = SR_HZ as f64 / OS_FACTOR as f64;
                     let off_hz = freq_offset_bins * bw_hz / (1u64 << sf) as f64;
-                    match nodes.rx_node_mut().process_rx_frame(&payload) {
+                    match node.process_rx_frame(&payload) {
                         Ok((Some(msg), fwd)) => {
                             if !msg.self_origin {
                                 shared.rx_count.fetch_add(1, Ordering::Relaxed);
@@ -685,7 +624,7 @@ impl MeshSimApp {
             uhd_warning:     None,
             auto_tx:         !init_uhd,
             msg_input:       String::new(),
-            mode:            if init_uhd { SimMode::Listen } else { SimMode::TwoNodeTest },
+            mode:            if init_uhd { SimMode::Listen } else { SimMode::Terminal },
             node_short:      "TERM".into(),
             node_long:       "Mesh Terminal".into(),
             tx_dest:         BROADCAST,
@@ -770,13 +709,6 @@ impl MeshSimApp {
 
     fn ui_mode_selector(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.selectable_label(self.mode == SimMode::TwoNodeTest, "Two-Node").clicked()
-                && self.mode != SimMode::TwoNodeTest
-            {
-                self.mode = SimMode::TwoNodeTest;
-                *self.shared.mode.lock().unwrap() = self.mode;
-                self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
-            }
             if ui.selectable_label(self.mode == SimMode::Terminal, "Terminal").clicked()
                 && self.mode != SimMode::Terminal
             {
@@ -965,48 +897,33 @@ impl MeshSimApp {
     }
 
     fn ui_nodes_info(&mut self, ui: &mut egui::Ui) {
-        let a_id = self.shared.a_id.lock().unwrap().clone();
-        if self.mode == SimMode::TwoNodeTest {
-            let b_id = self.shared.b_id.lock().unwrap().clone();
-            ui.label(format!("A  {a_id}"));
-            ui.label(format!("B  {b_id}"));
-            ui.add_space(4.0);
-            ui.label("A neighbours:");
-            for n in self.shared.a_neighbours.lock().unwrap().iter() {
-                ui.label(format!("  {n}"));
+        let id = self.shared.node_id_str.lock().unwrap().clone();
+        ui.label(format!("ID  {id}"));
+        ui.horizontal(|ui| {
+            ui.label("Short");
+            if ui.add(
+                egui::TextEdit::singleline(&mut self.node_short)
+                    .desired_width(40.0)
+                    .char_limit(4),
+            ).lost_focus() {
+                *self.shared.node_short.lock().unwrap() = self.node_short.clone();
+                self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
             }
-            ui.label("B neighbours:");
-            for n in self.shared.b_neighbours.lock().unwrap().iter() {
-                ui.label(format!("  {n}"));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            if ui.add(
+                egui::TextEdit::singleline(&mut self.node_long)
+                    .desired_width(ui.available_width()),
+            ).lost_focus() {
+                *self.shared.node_long.lock().unwrap() = self.node_long.clone();
+                self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
             }
-        } else {
-            ui.label(format!("ID  {a_id}"));
-            ui.horizontal(|ui| {
-                ui.label("Short");
-                if ui.add(
-                    egui::TextEdit::singleline(&mut self.node_short)
-                        .desired_width(40.0)
-                        .char_limit(4),
-                ).lost_focus() {
-                    *self.shared.node_short.lock().unwrap() = self.node_short.clone();
-                    self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                if ui.add(
-                    egui::TextEdit::singleline(&mut self.node_long)
-                        .desired_width(ui.available_width()),
-                ).lost_focus() {
-                    *self.shared.node_long.lock().unwrap() = self.node_long.clone();
-                    self.shared.rebuild_nodes.store(true, Ordering::Relaxed);
-                }
-            });
-            ui.add_space(4.0);
-            ui.label("Neighbours:");
-            for n in self.shared.a_neighbours.lock().unwrap().iter() {
-                ui.label(format!("  {n}"));
-            }
+        });
+        ui.add_space(4.0);
+        ui.label("Neighbours:");
+        for n in self.shared.neighbours.lock().unwrap().iter() {
+            ui.label(format!("  {n}"));
         }
     }
 
@@ -1026,7 +943,7 @@ impl MeshSimApp {
                         self.tx_dest = BROADCAST;
                         *self.shared.tx_dest.lock().unwrap() = BROADCAST;
                     }
-                    let neighbours = self.shared.a_neighbours.lock().unwrap().clone();
+                    let neighbours = self.shared.neighbours.lock().unwrap().clone();
                     for entry in &neighbours {
                         if let Some(hex) = entry.split("(!").nth(1).and_then(|s| s.strip_suffix(')')) {
                             if let Ok(id) = u32::from_str_radix(hex, 16) {
