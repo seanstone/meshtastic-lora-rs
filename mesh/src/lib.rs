@@ -18,6 +18,7 @@ pub mod proto;
 pub mod presets;
 pub mod app;
 pub mod model;
+pub mod radio;
 pub mod view;
 pub mod serial;
 pub mod mqtt;
