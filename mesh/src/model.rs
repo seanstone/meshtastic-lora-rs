@@ -26,6 +26,9 @@ pub const DEFAULT_PRESET_IDX: usize = 5;
 /// FFT size used by the spectrum / waterfall plots. The plots are sized to
 /// this on construction.
 pub const FFT_SIZE: usize = 2048;
+/// Sample rate driving the radio loop. Exposed here so the GUI can label its
+/// time/frequency axes against the same rate.
+pub const SR_HZ: u64 = 1_000_000;
 
 // ── Operating mode ──────────────────────────────────────────────────────────
 
