@@ -7,9 +7,8 @@
 /// Build WASM:  trunk build --release
 
 use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::Arc,
+    sync::atomic::Ordering,
     time::Duration,
 };
 
@@ -17,7 +16,7 @@ use eframe::egui::{self, Color32, RichText, ScrollArea};
 use rustfft::num_complex::Complex;
 use lora::channel::{Channel, Driver};
 use lora::modem::{Tx, Rx, StreamDecodeResult};
-use lora::ui::{Chart, SpectrumPlot, WaterfallPlot, SpectrumAnalyzer};
+use lora::ui::{Chart, SpectrumAnalyzer};
 #[cfg(feature = "uhd")]
 use lora::uhd::UhdDevice;
 
@@ -25,6 +24,11 @@ use mesh::{
     app::{ChannelConfig, MeshNode},
     mac::packet::BROADCAST,
     presets::{PRESETS, REGIONS, DEFAULT_REGION_IDX, ModemPreset, Region},
+    model::{
+        ViewModel, SimMode, LogEntry, MsgDir,
+        DEFAULT_SF, DEFAULT_SIGNAL_DB, DEFAULT_NOISE_DB, DEFAULT_INTERVAL_MS,
+        DEFAULT_PRESET_IDX, FFT_SIZE,
+    },
 };
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -34,35 +38,16 @@ const OS_FACTOR: u32 = 4;
 const CR: u8 = 4;
 const SYNC_WORD: u8 = 0x2B;
 const PREAMBLE: u16 = 16;
-const FFT_SIZE: usize = 2048;
 const SR_HZ: u64 = 1_000_000;
 const TICK: Duration = Duration::from_millis(16);
 const BEACON_INTERVAL: u64 = 5 * SR_HZ;
 
-const DEFAULT_SF: u8 = 11;
-const DEFAULT_SIGNAL_DB: f32 = -20.0;
-const DEFAULT_NOISE_DB: f32 = -60.0;
-const DEFAULT_INTERVAL_MS: u64 = 2000;
-const DEFAULT_PRESET_IDX: usize = 5;
 const MOBILE_BREAKPOINT: f32 = 600.0;
 
 // ── GitHub icon ─────────────────────────────────────────────────────────────
 
 const GITHUB_ICON: char = egui::special_emojis::GITHUB;
 const REPO_URL: &str = "https://github.com/seanstone/meshtastic-lora-rs";
-
-// ── Operating mode ──────────────────────────────────────────────────────────
-
-/// Operating mode.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SimMode {
-    /// Normal operation. Manual + auto TX/RX on a single node. Use with UHD
-    /// to talk to real Meshtastic radios.
-    Terminal,
-    /// RX-only mode.  No TX at all — no beacons, no forwarding, no user messages.
-    /// The USRP stays completely silent.  Good for passive monitoring.
-    Listen,
-}
 
 // ── Platform helpers ─────────────────────────────────────────────────────────
 
@@ -71,97 +56,6 @@ async fn tick_sleep(remaining: Duration) {
     tokio::time::sleep(remaining).await;
     #[cfg(target_arch = "wasm32")]
     gloo_timers::future::TimeoutFuture::new(remaining.as_millis() as u32).await;
-}
-
-// ── Shared state ─────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq)]
-enum MsgDir { Tx, Rx, Fwd, System, Error }
-
-#[derive(Clone)]
-struct LogEntry {
-    time:     String,
-    dir:      MsgDir,
-    text:     String,
-    from_id:  Option<u32>,
-    hops:     Option<u8>,
-    self_origin: bool,
-}
-
-struct SimShared {
-    running:       AtomicBool,
-    sf:            Mutex<u8>,
-    signal_db:     Mutex<f32>,
-    noise_db:      Mutex<f32>,
-    interval_ms:   Mutex<u64>,
-    log:           Mutex<VecDeque<LogEntry>>,
-    neighbours:    Mutex<Vec<String>>,
-    node_id_str:   Mutex<String>,
-    tx_count:      AtomicU64,
-    rx_count:      AtomicU64,
-
-    spectrum_plot:  Arc<SpectrumPlot>,
-    waterfall_plot: Arc<WaterfallPlot>,
-
-    use_uhd:        AtomicBool,
-    uhd_args:       Mutex<String>,
-    uhd_freq_hz:    Mutex<f64>,
-    uhd_rx_gain_db: Mutex<f64>,
-    uhd_tx_gain_db: Mutex<f64>,
-    rebuild_driver: AtomicBool,
-    uhd_loading:    AtomicBool,
-    uhd_warning:    Mutex<Option<String>>,
-
-    auto_tx:        AtomicBool,
-    tx_queue:       Mutex<VecDeque<String>>,
-
-    mode:           Mutex<SimMode>,
-    rebuild_nodes:  AtomicBool,
-    node_short:     Mutex<String>,
-    node_long:      Mutex<String>,
-    node_id:        Mutex<u32>,
-    tx_dest:        Mutex<u32>,
-}
-
-impl SimShared {
-    fn new() -> Arc<Self> {
-        let init_spec: Vec<[f64; 2]> = (0..FFT_SIZE).map(|i| [i as f64, -80.0]).collect();
-        let spectrum_plot  = SpectrumPlot::new("Spectrum",   init_spec.clone(), -80.0, 80.0);
-        let waterfall_plot = WaterfallPlot::new("Waterfall", init_spec,         -80.0);
-        waterfall_plot.set_freq(FFT_SIZE as f64 / 2.0);
-        waterfall_plot.set_bw(FFT_SIZE as f64);
-
-        Arc::new(Self {
-            running:      AtomicBool::new(true),
-            sf:           Mutex::new(DEFAULT_SF),
-            signal_db:    Mutex::new(DEFAULT_SIGNAL_DB),
-            noise_db:     Mutex::new(DEFAULT_NOISE_DB),
-            interval_ms:  Mutex::new(DEFAULT_INTERVAL_MS),
-            log:          Mutex::new(VecDeque::new()),
-            neighbours:   Mutex::new(vec![]),
-            node_id_str:  Mutex::new(String::new()),
-            tx_count:     AtomicU64::new(0),
-            rx_count:     AtomicU64::new(0),
-            spectrum_plot,
-            waterfall_plot,
-            use_uhd:        AtomicBool::new(false),
-            uhd_args:       Mutex::new(String::new()),
-            uhd_freq_hz:    Mutex::new(REGIONS[DEFAULT_REGION_IDX].channel_freq(PRESETS[DEFAULT_PRESET_IDX].bw_khz) * 1e6),
-            uhd_rx_gain_db: Mutex::new(40.0),
-            uhd_tx_gain_db: Mutex::new(40.0),
-            rebuild_driver: AtomicBool::new(false),
-            uhd_loading:    AtomicBool::new(false),
-            uhd_warning:    Mutex::new(None),
-            auto_tx:        AtomicBool::new(true),
-            tx_queue:       Mutex::new(VecDeque::new()),
-            mode:           Mutex::new(SimMode::Terminal),
-            rebuild_nodes:  AtomicBool::new(false),
-            node_short:     Mutex::new("TERM".into()),
-            node_long:      Mutex::new("Mesh Terminal".into()),
-            node_id:        Mutex::new(rand::random::<u32>()),
-            tx_dest:        Mutex::new(BROADCAST),
-        })
-    }
 }
 
 fn db_to_amp(db: f32) -> f32 { 10_f32.powf(db / 20.0) }
@@ -186,15 +80,15 @@ fn now_hms() -> String {
     }
 }
 
-fn push_log(shared: &SimShared, dir: MsgDir, text: String) {
+fn push_log(shared: &ViewModel, dir: MsgDir, text: String) {
     push_log_full(shared, dir, text, None, None, false);
 }
 
-fn push_log_ex(shared: &SimShared, dir: MsgDir, text: String, from_id: Option<u32>, hops: Option<u8>) {
+fn push_log_ex(shared: &ViewModel, dir: MsgDir, text: String, from_id: Option<u32>, hops: Option<u8>) {
     push_log_full(shared, dir, text, from_id, hops, false);
 }
 
-fn push_log_full(shared: &SimShared, dir: MsgDir, text: String, from_id: Option<u32>, hops: Option<u8>, self_origin: bool) {
+fn push_log_full(shared: &ViewModel, dir: MsgDir, text: String, from_id: Option<u32>, hops: Option<u8>, self_origin: bool) {
     let mut log = shared.log.lock().unwrap();
     log.push_back(LogEntry { time: now_hms(), dir, text, from_id, hops, self_origin });
     if log.len() > MAX_LOG { log.pop_front(); }
@@ -202,7 +96,7 @@ fn push_log_full(shared: &SimShared, dir: MsgDir, text: String, from_id: Option<
 
 // ── Driver factory ───────────────────────────────────────────────────────────
 
-fn make_driver(shared: &SimShared) -> Box<dyn Driver> {
+fn make_driver(shared: &ViewModel) -> Box<dyn Driver> {
     let noise_sigma = db_to_amp(*shared.noise_db.lock().unwrap()) / std::f32::consts::SQRT_2;
     let signal_amp  = db_to_amp(*shared.signal_db.lock().unwrap());
 
@@ -230,7 +124,7 @@ fn make_driver(shared: &SimShared) -> Box<dyn Driver> {
 
 // ── Simulation loop (async, runs on tokio native / spawn_local wasm) ─────────
 
-fn build_node(shared: &SimShared) -> MeshNode {
+fn build_node(shared: &ViewModel) -> MeshNode {
     let channel_cfg = ChannelConfig::default();
     let id    = *shared.node_id.lock().unwrap();
     let short = shared.node_short.lock().unwrap().clone();
@@ -239,7 +133,7 @@ fn build_node(shared: &SimShared) -> MeshNode {
     MeshNode::with_id(channel_cfg, id, &short, &long)
 }
 
-async fn sim_loop(shared: Arc<SimShared>) {
+async fn sim_loop(shared: Arc<ViewModel>) {
     let mut node = build_node(&shared);
 
     let mut driver: Box<dyn Driver> = make_driver(&shared);
@@ -551,7 +445,7 @@ async fn sim_loop(shared: Arc<SimShared>) {
 // ── GUI ──────────────────────────────────────────────────────────────────────
 
 struct MeshSimApp {
-    shared:          Arc<SimShared>,
+    shared:          Arc<ViewModel>,
     sf:              u8,
     signal_db:       f32,
     noise_db:        f32,
@@ -583,7 +477,7 @@ struct MeshSimApp {
 }
 
 impl MeshSimApp {
-    fn new(shared: Arc<SimShared>) -> Self {
+    fn new(shared: Arc<ViewModel>) -> Self {
         let mut spectrum_chart = Chart::new("spectrum");
         spectrum_chart.set_x_limits([0.0, FFT_SIZE as f64]);
         spectrum_chart.set_y_limits([-90.0, 50.0]);
@@ -1473,7 +1367,7 @@ mod wasm_entry {
     pub async fn start() {
         console_error_panic_hook::set_once();
 
-        let shared = SimShared::new();
+        let shared = ViewModel::new();
         let shared_sim = Arc::clone(&shared);
         wasm_bindgen_futures::spawn_local(sim_loop(shared_sim));
 
@@ -1499,7 +1393,7 @@ fn main() {}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
-    let shared = SimShared::new();
+    let shared = ViewModel::new();
 
     // Auto-detect USRP at startup.
     #[cfg(feature = "uhd")]

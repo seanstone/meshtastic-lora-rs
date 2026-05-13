@@ -17,6 +17,7 @@ pub mod mesh;
 pub mod proto;
 pub mod presets;
 pub mod app;
+pub mod model;
 pub mod serial;
 pub mod mqtt;
 pub mod ws;
