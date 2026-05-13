@@ -1,5 +1,12 @@
 # Examples & Guides
 
+> **Outdated.** The walkthroughs below were written for the old
+> `mesh_node` / `mesh_radio` binaries which were retired in the dual-GUI
+> refactor. The replacement `mesh` binary plus its `mesh_web` browser GUI
+> cover the same use cases through a single WebSocket protocol; this doc
+> hasn't been rewritten yet. See the top-level [README](../README.md)
+> for the current usage.
+
 Step-by-step walkthroughs for common use cases.  Assumes you have Rust
 installed (`rustup`) and have cloned this repo with submodules:
 

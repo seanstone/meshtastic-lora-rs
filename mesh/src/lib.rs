@@ -20,9 +20,8 @@ pub mod app;
 pub mod model;
 pub mod proto_ws;
 pub mod radio;
+#[cfg(any(feature = "desktop", feature = "wasm"))]
 pub mod view;
-pub mod serial;
-pub mod mqtt;
-pub mod ws;
 #[cfg(feature = "server")]
 pub mod server;
+

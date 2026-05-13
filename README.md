@@ -12,88 +12,51 @@ routing, duty-cycle enforcement, protobuf types, and the application interface
 
 ## Usage
 
-### GUI simulation
+The single `mesh` binary runs the radio loop, exposes an HTTP + WebSocket
+server, and (optionally) opens a desktop egui window. The same `view` module
+is reused by a WebAssembly binary (`mesh_web`) that the server hosts as a
+browser GUI.
 
 ```sh
-# Two-node mesh sim with spectrum + waterfall (default binary)
-cargo run
+# Build the wasm GUI bundle into dist/ (once, or after view changes)
+make wasm-web
 
-# Build WASM version
-make wasm-serve   # serves on http://localhost:3000
+# Run mesh — opens a desktop window if a display is available,
+# and serves http://0.0.0.0:3000 (HTTP + ws:///ws) for browser clients.
+cargo run --bin mesh
+# or:
+make run
 ```
 
-The `mesh_radio` GUI shows a left settings panel (preset selector, SF, TX/RX
-gain, driver selection Sim/UHD, node info) and a central panel with live
-spectrum, waterfall, and a scrolling mesh message log.
-
-### Headless node
+Headless / pure-server:
 
 ```sh
-# Text mode — type messages, see received packets
-cargo run --bin mesh_node
+# Skip the egui window even if compiled in.
+cargo run --bin mesh -- --headless
 
-# Serial protobuf mode — Meshtastic framing on stdin/stdout
-cargo run --bin mesh_node -- --serial
-
-# MQTT bridge — connect to mqtt.meshtastic.org
-cargo run --bin mesh_node -- --mqtt
-
-# MQTT with custom broker
-cargo run --bin mesh_node -- --mqtt --mqtt-host broker.local
-
-# Real RF via USRP
-cargo run --bin mesh_node -- --uhd --freq 906.875
-
-# WebSocket server — external tools connect via ws://localhost:9001
-cargo run --bin mesh_node -- --ws
-
-# Combine modes: MQTT + UHD + WebSocket (four-way bridge)
-cargo run --bin mesh_node -- --mqtt --uhd --freq 906.875 --ws
+# Build without the eframe-based desktop GUI at all (smaller binary):
+cargo run --bin mesh --no-default-features --features server,uhd
 ```
 
-**Text mode** (default) reads lines from stdin, transmits as
-`TEXT_MESSAGE_APP` broadcasts, and prints received messages to stdout.
-
-**Serial mode** (`--serial`) speaks the Meshtastic serial framing protocol
-(`[0x94 0xC3] [len_u16_be] [protobuf]`) using `FromRadio` / `ToRadio`
-messages.  Responds to config handshakes (`want_config_id` →
-`my_info` + `node_info` + `config_complete_id`).
-
-**MQTT mode** (`--mqtt`) connects to a Meshtastic MQTT broker, subscribes to
-`msh/2/c/LongFast/+`, and bridges packets between the local RF channel and
-the internet as `ServiceEnvelope` protobufs.
-
-**WebSocket** (`--ws`) starts a WebSocket server on port 9001 (or
-`--ws-port N`).  External tools send JSON commands and receive JSON events:
-
-```jsonc
-// → send to node
-{ "type": "send_text", "to": 4294967295, "text": "hello" }
-
-// ← received from node
-{ "type": "rx", "from": 2864434397, "to": 4294967295,
-  "portnum": 1, "text": "hello", "payload_len": 5, "hops": 2 }
-```
-
-`--ws` is combinable with any mode (text, serial, mqtt) — the WebSocket
-server runs alongside as an additional I/O channel.
+The web GUI at `http://<host>:3000/` opens a WebSocket back to `/ws` and
+mirrors the server's `ViewModel` into a local copy that the same egui
+rendering code paints — desktop and browser are the same view sitting on
+top of two different transports.
 
 ### PHY simulator
 
 ```sh
-# Original LoRa PHY GUI simulator (from lora-rs submodule)
+# Standalone LoRa PHY GUI simulator (from the lora-rs submodule)
 cargo run --bin gui_sim
 ```
 
-### Examples & guides
+### Wire protocol
 
-See [docs/examples.md](docs/examples.md) for detailed walkthroughs:
-- What is Meshtastic / LoRa (background for newcomers)
-- Exploring the GUI simulator
-- Talking to a real Meshtastic radio over MQTT
-- Building a Home Assistant alert bridge
-- Monitoring a mesh network from a web dashboard
-- Setting up a USRP SDR gateway
+External tools can talk to `/ws` directly with adjacently-tagged JSON.
+Outgoing commands use the [`Command`](mesh/src/model.rs) enum
+(`{"t":"SetSf","c":7}`, `{"t":"SendText","c":"hi"}`, etc.); the server
+pushes [`ServerMsg`](mesh/src/proto_ws.rs) frames — primarily `Snapshot`s
+of the radio state at ~10 Hz.
 
 ---
 
@@ -114,9 +77,11 @@ See [docs/examples.md](docs/examples.md) for detailed walkthroughs:
 │  │  proto    — Data, User, PortNum, MeshPacket, FromRadio  │   │
 │  │             ToRadio, ServiceEnvelope (prost types)       │   │
 │  └──────────────────────────┬──────────────────────────────┘   │
-│  serial — Meshtastic serial framing protocol                   │
-│  mqtt   — MQTT bridge (rumqttc, ServiceEnvelope)               │
-│  ws     — WebSocket server (JSON commands/events)              │
+│  model     — ViewModel, Command (radio's sole writer)          │
+│  radio     — sim_loop: drives PHY, drains Commands             │
+│  view      — egui rendering (cfg desktop or wasm)              │
+│  server    — axum HTTP + WS /ws, serves dist/ for the web GUI  │
+│  proto_ws  — Snapshot / ServerMsg wire types                   │
 │                              │ lora::modem  lora::channel       │
 └──────────────────────────────┼──────────────────────────────────┘
                                │
@@ -149,27 +114,22 @@ meshtastic-lora-rs/
 ├── mesh/                    — mesh networking crate
 │   └── src/
 │       ├── lib.rs
-│       ├── mac/
-│       │   ├── packet.rs    — MeshHeader / MeshFrame OTA framing
-│       │   ├── crypto.rs    — AES-256-CTR encrypt / decrypt
-│       │   └── duty_cycle.rs— airtime budget tracker
-│       ├── mesh/
-│       │   ├── router.rs    — stateless flood router + DedupCache
-│       │   └── node.rs      — LocalNode, NodeInfo, NeighbourTable
-│       ├── proto/
-│       │   ├── mod.rs       — re-exports + helper impls
-│       │   └── generated.rs — prost-build output (from protobufs/ submodule)
-│       ├── presets.rs       — ModemPreset + all 9 Meshtastic presets
+│       ├── mac/             — packet framing, AES, duty-cycle
+│       ├── mesh/            — flood router, node identity, neighbours
+│       ├── proto/           — prost types + helper impls
+│       ├── presets.rs       — ModemPreset + Meshtastic preset table
 │       ├── app.rs           — MeshNode public API
-│       ├── serial.rs        — serial framing (magic + length-prefix)
-│       ├── mqtt.rs          — MQTT bridge (rumqttc, ServiceEnvelope)
-│       ├── ws.rs            — WebSocket server (tokio-tungstenite, JSON)
+│       ├── model.rs         — shared ViewModel + Command enum
+│       ├── proto_ws.rs      — WS wire types (ServerMsg / Snapshot)
+│       ├── radio.rs         — sim_loop (drives PHY, drains Commands)
+│       ├── view/            — egui rendering (cfg desktop or wasm)
+│       ├── server.rs        — axum HTTP + WS server (cfg server)
 │       └── bin/
-│           ├── mesh_radio.rs  — egui GUI (spectrum + waterfall + mesh)
-│           └── mesh_node.rs — headless node (text / serial / MQTT)
+│           ├── mesh.rs      — combined server + optional desktop window
+│           └── mesh_web.rs  — wasm GUI, WS-backed
 ├── protobufs/               — meshtastic/protobufs submodule (.proto files)
-├── web/                     — WASM build assets
-│   └── index.html
+├── web/                     — WASM HTML shells
+│   └── index_web.html
 ├── Makefile
 └── Cargo.toml               — workspace root
 ```
@@ -197,9 +157,12 @@ with raw decoded bytes; the node returns
 `(Option<MeshMessage>, Option<MeshFrame>)` (deliver, forward).  This keeps
 the mesh layer testable without a running async runtime.
 
-**Three I/O modes in one binary.**  `mesh_node` supports text, serial
-protobuf, and MQTT in the same binary, selectable at runtime.  All three
-share the same PHY tick loop and `MeshNode` instance.
+**One binary, dual GUI.**  `mesh` runs the radio + HTTP/WS server in a
+background tokio runtime; the desktop egui window is a compile-time
+opt-in (`desktop` feature) and the wasm `mesh_web` binary hosts the
+same `view` module in a browser, talking back over `/ws`. The
+`Command` enum and `Snapshot` types are the only wire surface between
+them.
 
 ---
 

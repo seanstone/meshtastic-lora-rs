@@ -3,21 +3,17 @@ name        = "mesh"
 version     = "0.1.0"
 edition     = "2024"
 license     = "GPL-3.0-only"
-default-run = "mesh_radio"
+default-run = "mesh"
 
 [features]
-default = ["uhd", "mqtt", "ws", "server"]
+default = ["uhd", "server", "desktop"]
 # UHD (USRP Hardware Driver) support — forwards to lora crate.
 uhd     = ["lora/uhd"]
-# MQTT bridge support (used by mesh_node --mqtt).
-mqtt    = ["dep:rumqttc"]
-# Legacy WebSocket server for external-tool integration (used by mesh_node --ws).
-# Superseded by `server` for the new `mesh` binary; kept until mesh_node retires.
-ws      = ["dep:tokio-tungstenite", "dep:futures-util", "dep:serde_json"]
-# Wasm web GUI feature pulls in futures-util + gloo-net (WebSocket client).
 # axum-based HTTP+WS server hosted by the combined `mesh` binary.
 server  = ["dep:axum", "dep:serde_json", "dep:tokio-stream", "dep:tower-http"]
-# WebAssembly build — uses gloo-timers and wasm-bindgen entry point.
+# Native desktop egui window for the `mesh` binary. Off → pure server build.
+desktop = []
+# WebAssembly browser GUI (mesh_web bin) — same view code, WS-backed transport.
 wasm    = [
     "dep:gloo-timers",
     "dep:gloo-net",
@@ -34,9 +30,10 @@ wasm    = [
 # PHY layer (submodule — no C deps by default; UHD gated on feature)
 lora = { path = "../lora-rs", default-features = false }
 
-# GUI (used by the mesh_radio binary)
-egui      = "0.33"
-eframe    = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+# egui GUI runtime — used by the `view` module (compiled when desktop or wasm
+# is on). The dep is unconditional because `lora` re-exports egui widget types
+# (SpectrumPlot, WaterfallPlot) regardless.
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 
 # AES-256-CTR encryption (pure Rust, no_std-compatible)
 aes = "0.8"
@@ -48,22 +45,18 @@ prost = "0.13"
 # Random node ID generation
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 
-# FFT for spectrum analyzer (used by mesh_radio binary via lora::ui types)
+# FFT for spectrum analyzer (used by mesh::radio via lora::ui types).
 rustfft = "6"
 
-# QR code generation (used by mesh_radio for repo link)
+# QR code generation for the GitHub repo link in the GUI.
 qrcode = "0.14"
 
-# MQTT bridge (native only, used by mesh_node --mqtt)
-rumqttc = { version = "0.24", optional = true }
-
-# Legacy WebSocket server (used by mesh_node --ws).
-tokio-tungstenite = { version = "0.24", optional = true }
-futures-util      = { version = "0.3", optional = true, features = ["sink"] }
+# Futures combinators — used on the wasm side for the WS Sink+Stream pair.
+futures-util = { version = "0.3", optional = true, features = ["sink"] }
 
 # Serde derives are always on — the Command enum needs Deserialize for the
 # server feature and Serialize-on-wire ergonomics; serde_json is only pulled
-# in when ws or server is enabled.
+# in when the server feature or the wasm feature is enabled.
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 

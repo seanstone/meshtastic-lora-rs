@@ -1,14 +1,12 @@
-//! `mesh` — combined headless server.
+//! `mesh` — the combined binary.
 //!
-//! Boots the shared [`ViewModel`], runs the radio loop in the background, and
-//! exposes HTTP + WebSocket on a single port for the web GUI (or any other
-//! tool) to drive. The desktop egui window is added in a later stage behind
-//! a compile-time feature.
-//!
-//! CLI:
+//! Always runs: the radio loop + HTTP/WS server. The desktop egui window is
+//! optional — compiled in via the `desktop` cargo feature and skipped at
+//! runtime if `--headless` is set or no X11/Wayland display is reachable.
 //!
 //! ```text
-//! mesh [--bind ADDR]      # default 0.0.0.0:3000
+//! mesh [--bind ADDR]   # default 0.0.0.0:3000
+//!      [--headless]    # skip the egui window even if desktop feature is on
 //! ```
 
 use std::net::SocketAddr;
@@ -19,13 +17,20 @@ use tokio::sync::mpsc;
 
 use mesh::{model::ViewModel, radio::sim_loop, server};
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let bind = parse_args();
+struct Args {
+    bind:     SocketAddr,
+    /// Read only when the `desktop` feature is on; pure-server builds parse
+    /// the flag for CLI consistency but ignore it.
+    #[allow(dead_code)]
+    headless: bool,
+}
+
+fn main() -> std::io::Result<()> {
+    let args = parse_args();
 
     let shared = ViewModel::new();
 
-    // Auto-detect USRP at startup, same as mesh_radio does.
+    // Auto-detect USRP at startup.
     #[cfg(feature = "uhd")]
     {
         eprint!("[uhd] probing for USRP… ");
@@ -40,31 +45,61 @@ async fn main() -> std::io::Result<()> {
     }
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let shared_for_radio = Arc::clone(&shared);
-    tokio::spawn(sim_loop(shared_for_radio, cmd_rx));
 
-    tokio::select! {
-        result = server::serve(bind, shared, cmd_tx) => result,
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("[mesh] shutting down");
-            Ok(())
-        }
+    // Radio + server live on a background tokio runtime. The main thread
+    // either parks on the runtime (headless) or hosts the eframe window.
+    let bg = std::thread::Builder::new()
+        .name("mesh-runtime".into())
+        .spawn({
+            let shared = Arc::clone(&shared);
+            let cmd_tx = cmd_tx.clone();
+            move || {
+                let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+                rt.block_on(async move {
+                    tokio::spawn(sim_loop(Arc::clone(&shared), cmd_rx));
+                    let serve_fut = server::serve(args.bind, shared, cmd_tx);
+                    tokio::select! {
+                        result = serve_fut       => result,
+                        _      = tokio::signal::ctrl_c() => Ok(()),
+                    }
+                })
+            }
+        })
+        .expect("spawn runtime thread");
+
+    #[cfg(feature = "desktop")]
+    if !args.headless && has_display() {
+        return run_desktop_gui(shared, cmd_tx);
     }
+    #[cfg(feature = "desktop")]
+    if !args.headless {
+        eprintln!("[mesh] no display detected (DISPLAY / WAYLAND_DISPLAY unset) — running headless");
+    }
+    #[cfg(not(feature = "desktop"))]
+    let _ = (&shared, &cmd_tx); // suppress unused-variable warnings
+
+    // Headless: wait for the runtime to exit (Ctrl+C reaches it via signal::ctrl_c).
+    bg.join().expect("runtime thread panicked")
 }
 
-fn parse_args() -> SocketAddr {
-    let args: Vec<String> = std::env::args().collect();
+fn parse_args() -> Args {
     let mut bind: SocketAddr = "0.0.0.0:3000".parse().expect("default addr");
+    let mut headless = false;
+    let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
+    while i < argv.len() {
+        match argv[i].as_str() {
             "--bind" => {
                 i += 1;
-                bind = args.get(i).expect("--bind needs an address")
+                bind = argv.get(i).expect("--bind needs an address")
                     .parse().expect("invalid --bind address");
             }
+            "--headless" => headless = true,
             "--help" | "-h" => {
-                eprintln!("Usage: mesh [--bind ADDR]\n  default: --bind 0.0.0.0:3000");
+                eprintln!(
+                    "Usage: mesh [--bind ADDR] [--headless]\n  \
+                     default: --bind 0.0.0.0:3000"
+                );
                 std::process::exit(0);
             }
             other => {
@@ -74,5 +109,36 @@ fn parse_args() -> SocketAddr {
         }
         i += 1;
     }
-    bind
+    Args { bind, headless }
+}
+
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+fn has_display() -> bool {
+    std::env::var("DISPLAY").is_ok()
+        || std::env::var("WAYLAND_DISPLAY").is_ok()
+        || std::env::var("WAYLAND_SOCKET").is_ok()
+}
+#[cfg(all(feature = "desktop", not(target_os = "linux")))]
+fn has_display() -> bool { true }
+
+#[cfg(feature = "desktop")]
+fn run_desktop_gui(
+    shared: Arc<ViewModel>,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<mesh::model::Command>,
+) -> std::io::Result<()> {
+    use eframe::egui;
+    use mesh::view::MeshSimApp;
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("mesh")
+            .with_inner_size([960.0, 700.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "mesh",
+        options,
+        Box::new(move |_cc| Ok(Box::new(MeshSimApp::new(shared, cmd_tx)))),
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
 }
