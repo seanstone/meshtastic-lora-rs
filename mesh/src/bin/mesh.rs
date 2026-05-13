@@ -5,7 +5,7 @@
 //! runtime if `--headless` is set or no X11/Wayland display is reachable.
 //!
 //! ```text
-//! mesh [--bind ADDR]   # default 0.0.0.0:3000
+//! mesh [--bind ADDR]   # default 0.0.0.0:9069
 //!      [--headless]    # skip the egui window even if desktop feature is on
 //! ```
 
@@ -83,7 +83,7 @@ fn main() -> std::io::Result<()> {
 }
 
 fn parse_args() -> Args {
-    let mut bind: SocketAddr = "0.0.0.0:3000".parse().expect("default addr");
+    let mut bind: SocketAddr = "0.0.0.0:9069".parse().expect("default addr");
     let mut headless = false;
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -98,7 +98,7 @@ fn parse_args() -> Args {
             "--help" | "-h" => {
                 eprintln!(
                     "Usage: mesh [--bind ADDR] [--headless]\n  \
-                     default: --bind 0.0.0.0:3000"
+                     default: --bind 0.0.0.0:9069"
                 );
                 std::process::exit(0);
             }

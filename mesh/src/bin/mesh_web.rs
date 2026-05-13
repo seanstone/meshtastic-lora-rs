@@ -93,7 +93,7 @@ mod entry {
 
     fn build_ws_url() -> String {
         let location = web_sys::window().unwrap().location();
-        let host = location.host().unwrap_or_else(|_| "localhost:3000".into());
+        let host = location.host().unwrap_or_else(|_| "localhost:9069".into());
         let proto = if location.protocol().unwrap_or_default() == "https:" {
             "wss"
         } else {

@@ -22,7 +22,7 @@ browser GUI.
 make wasm-web
 
 # Run mesh — opens a desktop window if a display is available,
-# and serves http://0.0.0.0:3000 (HTTP + ws:///ws) for browser clients.
+# and serves http://0.0.0.0:9069 (HTTP + ws:///ws) for browser clients.
 cargo run --bin mesh
 # or:
 make run
@@ -38,7 +38,7 @@ cargo run --bin mesh -- --headless
 cargo run --bin mesh --no-default-features --features server,uhd
 ```
 
-The web GUI at `http://<host>:3000/` opens a WebSocket back to `/ws` and
+The web GUI at `http://<host>:9069/` opens a WebSocket back to `/ws` and
 mirrors the server's `ViewModel` into a local copy that the same egui
 rendering code paints — desktop and browser are the same view sitting on
 top of two different transports.
