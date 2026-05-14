@@ -104,7 +104,7 @@ impl MeshSimApp {
             uhd_warning:     None,
             auto_tx:         !init_uhd,
             msg_input:       String::new(),
-            mode:            if init_uhd { SimMode::Listen } else { SimMode::Terminal },
+            mode:            SimMode::Listen,
             node_short:      "TERM".into(),
             node_long:       "Mesh Terminal".into(),
             tx_dest:         BROADCAST,

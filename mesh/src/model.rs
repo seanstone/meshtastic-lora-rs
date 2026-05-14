@@ -220,7 +220,7 @@ impl ViewModel {
             uhd_warning:    Mutex::new(None),
             auto_tx:        AtomicBool::new(true),
             tx_queue:       Mutex::new(VecDeque::new()),
-            mode:           Mutex::new(SimMode::Terminal),
+            mode:           Mutex::new(SimMode::Listen),
             rebuild_nodes:  AtomicBool::new(false),
             node_short:     Mutex::new("TERM".into()),
             node_long:      Mutex::new("Mesh Terminal".into()),
