@@ -1,13 +1,17 @@
 WASM_TARGET = wasm32-unknown-unknown
 WASM_OUT    = dist
+BIN_OUT     = bin
 
 # Default target — build native + wasm GUI.
 build: native wasm-web ## Build the native binary and the wasm GUI bundle.
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
-native: ## Build the native mesh binary (release).
+native: ## Build the native mesh binary (release) and copy it to bin/.
 	cargo build --release --bin mesh
+	@mkdir -p $(BIN_OUT)
+	cp target/release/mesh $(BIN_OUT)/mesh
+	@echo "✓ mesh ready in $(BIN_OUT)/mesh"
 
 wasm-web: ## Build the wasm GUI bundle into dist/ for `mesh` to serve.
 	cargo build --target $(WASM_TARGET) --bin mesh_web \
@@ -38,4 +42,7 @@ run-headless: ## Run the server, skipping the desktop window.
 clean-wasm: ## Remove the wasm GUI bundle.
 	rm -rf $(WASM_OUT)
 
-.PHONY: build native run run-headless wasm-web wasm-web-opt clean-wasm
+clean-bin: ## Remove the copied native binary.
+	rm -rf $(BIN_OUT)
+
+.PHONY: build native run run-headless wasm-web wasm-web-opt clean-wasm clean-bin
