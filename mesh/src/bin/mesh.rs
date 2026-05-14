@@ -46,17 +46,36 @@ fn main() -> std::io::Result<()> {
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
-    // Radio + server live on a background tokio runtime. The main thread
-    // either parks on the runtime (headless) or hosts the eframe window.
+    // Radio runs on its own dedicated thread with a single-threaded current-
+    // thread tokio runtime. This isolates the heavy synchronous work in each
+    // radio tick (FFT, decode, UHD send) from the server's tokio workers, so
+    // a long decode or a blocked UHD push can't starve the snapshot loop and
+    // freeze the web GUI.
+    let _radio = std::thread::Builder::new()
+        .name("mesh-radio".into())
+        .spawn({
+            let shared = Arc::clone(&shared);
+            move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("radio runtime");
+                rt.block_on(sim_loop(shared, cmd_rx));
+            }
+        })
+        .expect("spawn radio thread");
+
+    // Server runs on a separate multi-thread tokio runtime — the snapshot
+    // loop and any future per-client tasks share workers among themselves
+    // but never with the radio.
     let bg = std::thread::Builder::new()
-        .name("mesh-runtime".into())
+        .name("mesh-server".into())
         .spawn({
             let shared = Arc::clone(&shared);
             let cmd_tx = cmd_tx.clone();
             move || {
-                let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+                let rt = tokio::runtime::Runtime::new().expect("server runtime");
                 rt.block_on(async move {
-                    tokio::spawn(sim_loop(Arc::clone(&shared), cmd_rx));
                     let serve_fut = server::serve(args.bind, shared, cmd_tx);
                     tokio::select! {
                         result = serve_fut       => result,
@@ -65,7 +84,7 @@ fn main() -> std::io::Result<()> {
                 })
             }
         })
-        .expect("spawn runtime thread");
+        .expect("spawn server thread");
 
     #[cfg(feature = "desktop")]
     if !args.headless && has_display() {
